@@ -26,7 +26,7 @@ async fn send_file(
     state: State<'_, AppState>,
     target_addr: String,
     file_path: String,
-    enable_compression: bool,
+    enable_compression: Option<bool>,
 ) -> Result<(), String> {
     use std::io::Write;
     let log_path = dirs::home_dir()
@@ -67,7 +67,7 @@ async fn send_file(
 
     let result = state
         .transfer_service
-        .send_file_compressed(path, addr, enable_compression)
+        .send_file_compressed(path, addr, enable_compression.unwrap_or(false))
         .await
         .map(|_| ())
         .map_err(|e| e.to_string());

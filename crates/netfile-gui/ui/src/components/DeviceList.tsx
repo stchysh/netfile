@@ -63,7 +63,6 @@ function DeviceList({ devices }: Props) {
                 <button
                   className="send-button"
                   onClick={() => handleSendFile(device)}
-                  disabled={device.is_self}
                 >
                   发送文件
                 </button>

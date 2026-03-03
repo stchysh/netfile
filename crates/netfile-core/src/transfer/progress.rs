@@ -67,7 +67,7 @@ impl TransferProgress {
         if speed == 0.0 {
             return Duration::from_secs(0);
         }
-        let remaining = self.total_size - self.transferred;
+        let remaining = self.total_size.saturating_sub(self.transferred);
         Duration::from_secs_f64(remaining as f64 / speed)
     }
 

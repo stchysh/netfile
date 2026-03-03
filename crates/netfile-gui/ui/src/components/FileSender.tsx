@@ -27,15 +27,8 @@ interface SelectedFile {
 function FileSender({ device, onClose }: Props) {
   const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([])
   const [enableCompression, setEnableCompression] = useState(false)
-  const [sendState, setSendState] = useState<'idle' | 'sending' | 'success' | 'error'>('idle')
   const [dragOver, setDragOver] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
-  const [logs, setLogs] = useState<string[]>([])
-
-  const addLog = (msg: string) => {
-    const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    setLogs((prev) => [...prev, `[${time}] ${msg}`])
-  }
 
   useEffect(() => {
     const unlisten = listen<{ paths: string[]; position: unknown } | string[]>(
@@ -107,51 +100,21 @@ function FileSender({ device, onClose }: Props) {
     setSelectedFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
-  const handleSend = async () => {
-    console.log('[handleSend] called, selectedFiles:', selectedFiles)
+  const handleSend = () => {
     if (selectedFiles.length === 0) {
       setErrorMessage('请先选择文件或文件夹')
       return
     }
 
-    setErrorMessage('')
-    setLogs([])
-    setSendState('sending')
     const targetAddr = `${device.ip}:${device.port}`
-    addLog(`开始发送，目标: ${targetAddr}`)
-    addLog(`文件数: ${selectedFiles.length}`)
-    const minDelay = new Promise<void>((resolve) => setTimeout(resolve, 3000))
-
-    let sendError: string | null = null
-    try {
-      for (const file of selectedFiles) {
-        console.log('[handleSend] invoking send_file:', file.path, '->', targetAddr)
-        addLog(`发送文件: ${file.path}`)
-        await invoke('send_file', {
-          targetAddr,
-          filePath: file.path,
-          enableCompression,
-        })
-        addLog(`文件发送完成: ${file.name}`)
-      }
-    } catch (error) {
-      sendError = String(error)
-      console.log('[handleSend] error:', sendError)
-      addLog(`错误: ${sendError}`)
+    for (const file of selectedFiles) {
+      invoke('send_file', {
+        targetAddr,
+        filePath: file.path,
+        enableCompression,
+      })
     }
-
-    addLog('等待最短显示时间...')
-    await minDelay
-
-    if (sendError) {
-      setErrorMessage(sendError)
-      setSendState('error')
-    } else {
-      addLog('全部发送成功')
-      setSendState('success')
-      await new Promise<void>((resolve) => setTimeout(resolve, 1500))
-      onClose()
-    }
+    onClose()
   }
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -246,35 +209,18 @@ function FileSender({ device, onClose }: Props) {
               <span>启用压缩</span>
             </label>
           </div>
-
-          {logs.length > 0 && (
-            <div className="debug-log">
-              {logs.map((line, i) => (
-                <div key={i}>{line}</div>
-              ))}
-            </div>
-          )}
         </div>
 
         <div className="modal-footer">
-          {sendState === 'error' && errorMessage && (
+          {errorMessage && (
             <div className="error-message">{errorMessage}</div>
           )}
-          {sendState === 'success' && (
-            <div className="success-message">发送成功，文件已保存到对方的 Downloads/NetFile 目录</div>
-          )}
           <div className="footer-buttons">
-            <button className="cancel-button" onClick={onClose} disabled={sendState === 'sending' || sendState === 'success'}>
+            <button className="cancel-button" onClick={onClose}>
               取消
             </button>
-            <button
-              className="send-button"
-              onClick={handleSend}
-              disabled={sendState === 'sending' || sendState === 'success'}
-            >
-              {sendState === 'sending' && '发送中...'}
-              {sendState === 'success' && '发送成功'}
-              {(sendState === 'idle' || sendState === 'error') && `发送${selectedFiles.length > 0 ? ` (${selectedFiles.length})` : ''}`}
+            <button className="send-button" onClick={handleSend}>
+              {`发送${selectedFiles.length > 0 ? ` (${selectedFiles.length})` : ''}`}
             </button>
           </div>
         </div>

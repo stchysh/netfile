@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import './Settings.css'
 
 interface Config {
@@ -18,6 +19,8 @@ interface Config {
     chunk_size: number
     max_concurrent: number
     enable_compression: boolean
+    download_dir: string
+    speed_limit_mbps: number
   }
   security: {
     require_auth: boolean
@@ -29,6 +32,11 @@ interface Config {
 
 interface Props {
   onClose: () => void
+}
+
+function formatChunkSize(bytes: number): string {
+  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(0)} MB`
+  return `${(bytes / 1024).toFixed(0)} KB`
 }
 
 function Settings({ onClose }: Props) {
@@ -63,6 +71,20 @@ function Settings({ onClose }: Props) {
       alert(`保存失败: ${error}`)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleBrowseDownloadDir = async () => {
+    try {
+      const selected = await open({ multiple: false, directory: true })
+      if (selected && config) {
+        setConfig({
+          ...config,
+          transfer: { ...config.transfer, download_dir: selected as string },
+        })
+      }
+    } catch (error) {
+      console.error('Failed to pick directory:', error)
     }
   }
 
@@ -106,7 +128,7 @@ function Settings({ onClose }: Props) {
               <label>设备名称</label>
               <input
                 type="text"
-        lue={config.instance.device_name}
+                value={config.instance.device_name}
                 onChange={(e) =>
                   setConfig({
                     ...config,
@@ -156,16 +178,22 @@ function Settings({ onClose }: Props) {
               />
             </div>
             <div className="form-group">
-              <label>广播间隔 (秒)</label>
+              <div className="slider-label-row">
+                <label>广播间隔</label>
+                <span className="slider-value">{config.network.broadcast_interval} 秒</span>
+              </div>
               <input
-                type="number"
+                type="range"
+                min={1}
+                max={60}
+                step={1}
                 value={config.network.broadcast_interval}
                 onChange={(e) =>
                   setConfig({
                     ...config,
                     network: {
                       ...config.network,
-                      broadcast_interval: parseInt(e.target.value) || 5,
+                      broadcast_interval: parseInt(e.target.value),
                     },
                   })
                 }
@@ -176,32 +204,89 @@ function Settings({ onClose }: Props) {
           <div className="settings-section">
             <h3>传输配置</h3>
             <div className="form-group">
-              <label>块大小 (字节)</label>
+              <label>下载目录</label>
+              <div className="dir-input-row">
+                <input
+                  type="text"
+                  value={config.transfer.download_dir}
+                  placeholder="留空使用默认目录 (Downloads/NetFile)"
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      transfer: { ...config.transfer, download_dir: e.target.value },
+                    })
+                  }
+                />
+                <button className="browse-button" onClick={handleBrowseDownloadDir}>
+                  浏览
+                </button>
+              </div>
+            </div>
+            <div className="form-group">
+              <div className="slider-label-row">
+                <label>块大小</label>
+                <span className="slider-value">{formatChunkSize(config.transfer.chunk_size)}</span>
+              </div>
               <input
-                type="number"
+                type="range"
+                min={65536}
+                max={8388608}
+                step={65536}
                 value={config.transfer.chunk_size}
                 onChange={(e) =>
                   setConfig({
                     ...config,
                     transfer: {
                       ...config.transfer,
-                      chunk_size: parseInt(e.target.value) || 1048576,
+                      chunk_size: parseInt(e.target.value),
                     },
                   })
                 }
               />
             </div>
             <div className="form-group">
-              <label>最大并发数</label>
+              <div className="slider-label-row">
+                <label>最大并发数</label>
+                <span className="slider-value">{config.transfer.max_concurrent}</span>
+              </div>
               <input
-                type="number"
+                type="range"
+                min={1}
+                max={16}
+                step={1}
                 value={config.transfer.max_concurrent}
                 onChange={(e) =>
                   setConfig({
                     ...config,
                     transfer: {
                       ...config.transfer,
-                      max_concurrent: parseInt(e.target.value) || 3,
+                      max_concurrent: parseInt(e.target.value),
+                    },
+                  })
+                }
+              />
+            </div>
+            <div className="form-group">
+              <div className="slider-label-row">
+                <label>传输速度上限</label>
+                <span className="slider-value">
+                  {config.transfer.speed_limit_mbps === 0
+                    ? '不限'
+                    : `${config.transfer.speed_limit_mbps} MB/s`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={500}
+                step={1}
+                value={config.transfer.speed_limit_mbps}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    transfer: {
+                      ...config.transfer,
+                      speed_limit_mbps: parseInt(e.target.value),
                     },
                   })
                 }

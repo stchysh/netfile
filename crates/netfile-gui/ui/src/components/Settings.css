@@ -101,3 +101,54 @@
   color: #7f8c8d;
   font-size: 1rem;
 }
+
+.slider-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.slider-label-row label {
+  margin-bottom: 0;
+}
+
+.slider-value {
+  font-size: 0.875rem;
+  color: #3498db;
+  font-weight: 600;
+}
+
+.form-group input[type='range'] {
+  width: 100%;
+  cursor: pointer;
+  accent-color: #3498db;
+}
+
+.dir-input-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.dir-input-row input[type='text'] {
+  flex: 1;
+}
+
+.browse-button {
+  flex-shrink: 0;
+  padding: 0.75rem 1rem;
+  background-color: #ecf0f1;
+  color: #2c3e50;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  white-space: nowrap;
+}
+
+.browse-button:hover {
+  background-color: #d5dbdb;
+}

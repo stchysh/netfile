@@ -149,12 +149,18 @@ pub fn run() {
                     .join(".netfile")
                     .join("data");
 
-                let download_dir = dirs::download_dir()
-                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-                    .join("NetFile");
+                let download_dir = if config.transfer.download_dir.is_empty() {
+                    dirs::download_dir()
+                        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+                        .join("NetFile")
+                } else {
+                    PathBuf::from(&config.transfer.download_dir)
+                };
 
                 tokio::fs::create_dir_all(&data_dir).await.ok();
                 tokio::fs::create_dir_all(&download_dir).await.ok();
+
+                let speed_limit_bytes_per_sec = config.transfer.speed_limit_mbps as u64 * 1024 * 1024;
 
                 let transfer_service = Arc::new(
                     TransferService::new_with_compression(
@@ -164,6 +170,7 @@ pub fn run() {
                         data_dir.clone(),
                         download_dir,
                         config.transfer.enable_compression,
+                        speed_limit_bytes_per_sec,
                     )
                     .await
                     .expect("Failed to create transfer service"),

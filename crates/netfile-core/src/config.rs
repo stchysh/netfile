@@ -38,6 +38,10 @@ pub struct TransferConfig {
     pub max_concurrent: usize,
     #[serde(default)]
     pub enable_compression: bool,
+    #[serde(default)]
+    pub download_dir: String,
+    #[serde(default)]
+    pub speed_limit_mbps: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +124,8 @@ impl Default for TransferConfig {
             chunk_size: default_chunk_size(),
             max_concurrent: default_max_concurrent(),
             enable_compression: false,
+            download_dir: String::new(),
+            speed_limit_mbps: 0,
         }
     }
 }

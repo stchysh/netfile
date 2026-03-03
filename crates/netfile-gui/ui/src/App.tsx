@@ -34,6 +34,8 @@ function App() {
   const [transfers, setTransfers] = useState<Transfer[]>([])
   const [showSettings, setShowSettings] = useState(false)
   const [transferError, setTransferError] = useState<string | null>(null)
+  const [transferSuccess, setTransferSuccess] = useState<string | null>(null)
+  const [transferStatus, setTransferStatus] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchDevices = async () => {
@@ -60,13 +62,27 @@ function App() {
     const devicesInterval = setInterval(fetchDevices, 1000)
     const transfersInterval = setInterval(fetchTransfers, 500)
 
+    const unlistenStarted = listen<string>('transfer-started', (event) => {
+      setTransferStatus(`正在发送: ${event.payload}`)
+      setTransferError(null)
+      setTransferSuccess(null)
+    })
+
+    const unlistenComplete = listen<string>('transfer-complete', (event) => {
+      setTransferStatus(null)
+      setTransferSuccess(`发送成功: ${event.payload}`)
+    })
+
     const unlistenError = listen<string>('transfer-error', (event) => {
+      setTransferStatus(null)
       setTransferError(event.payload)
     })
 
     return () => {
       clearInterval(devicesInterval)
       clearInterval(transfersInterval)
+      unlistenStarted.then((fn) => fn())
+      unlistenComplete.then((fn) => fn())
       unlistenError.then((fn) => fn())
     }
   }, [])
@@ -79,10 +95,21 @@ function App() {
           ⚙️ 设置
         </button>
       </header>
+      {transferStatus && (
+        <div className="transfer-status-banner">
+          <span>{transferStatus}</span>
+        </div>
+      )}
       {transferError && (
         <div className="transfer-error-banner">
           <span>发送失败: {transferError}</span>
           <button onClick={() => setTransferError(null)}>×</button>
+        </div>
+      )}
+      {transferSuccess && (
+        <div className="transfer-success-banner">
+          <span>{transferSuccess}</span>
+          <button onClick={() => setTransferSuccess(null)}>×</button>
         </div>
       )}
       <div className="app-content">

@@ -38,11 +38,23 @@ async fn send_file(
         return Err(format!("File not found: {}", file_path));
     }
 
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     let transfer_service = state.transfer_service.clone();
     tokio::spawn(async move {
-        if let Err(e) = transfer_service.send_file_compressed(path, addr, enable_compression).await {
-            tracing::error!("Transfer failed: {}", e);
-            let _ = app_handle.emit("transfer-error", e.to_string());
+        let _ = app_handle.emit("transfer-started", file_name.clone());
+        match transfer_service.send_file_compressed(path, addr, enable_compression).await {
+            Ok(_) => {
+                let _ = app_handle.emit("transfer-complete", file_name);
+            }
+            Err(e) => {
+                tracing::error!("Transfer failed: {}", e);
+                let _ = app_handle.emit("transfer-error", e.to_string());
+            }
         }
     });
 

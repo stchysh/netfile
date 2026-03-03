@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub async fn calculate_file_hash(path: &Path) -> anyhow::Result<[u8; 32]> {
     let mut file = File::open(path).await?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 8192];
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
 
     loop {
         let n = file.read(&mut buffer).await?;

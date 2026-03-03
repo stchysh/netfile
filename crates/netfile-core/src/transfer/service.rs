@@ -1,5 +1,6 @@
 use super::file_transfer::FileReceiver;
-use super::file_utils::{calculate_chunk_checksum, calculate_file_hash};
+use super::file_utils::calculate_chunk_checksum;
+use sha2::{Digest, Sha256};
 use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
 use crate::protocol::{ChunkData, Message, TransferComplete, TransferError, TransferRequest, TransferResponse};
@@ -121,7 +122,7 @@ impl TransferService {
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
-        if len > 12 * 1024 * 1024 {
+        if len > 64 * 1024 * 1024 {
             return Err(anyhow::anyhow!("Message too large: {} bytes", len));
         }
         let mut buf = vec![0u8; len];
@@ -237,25 +238,25 @@ impl TransferService {
                     }
 
                     self.progress_tracker.update_progress(&file_id, chunk_size).await;
-
-                    if receiver.is_complete() {
-                        match receiver.finalize().await {
-                            Ok(()) => {
-                                info!("Transfer completed for file: {}", file_id);
-                                Self::write_msg(&mut stream, &Message::TransferComplete(TransferComplete {
-                                    file_id: file_id.clone(),
-                                })).await?;
-                            }
-                            Err(e) => {
-                                let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
-                                    file_id: file_id.clone(),
-                                    error: e.to_string(),
-                                })).await;
-                                return Err(e);
-                            }
+                }
+                Message::TransferComplete(tc) => {
+                    match receiver.finalize(tc.file_hash).await {
+                        Ok(()) => {
+                            info!("Transfer completed for file: {}", file_id);
+                            Self::write_msg(&mut stream, &Message::TransferComplete(TransferComplete {
+                                file_id: file_id.clone(),
+                                file_hash: tc.file_hash,
+                            })).await?;
                         }
-                        break;
+                        Err(e) => {
+                            let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
+                                file_id: file_id.clone(),
+                                error: e.to_string(),
+                            })).await;
+                            return Err(e);
+                        }
                     }
+                    break;
                 }
                 _ => {
                     warn!("Unexpected message during chunk transfer");
@@ -328,7 +329,6 @@ impl TransferService {
 
         let metadata = tokio::fs::metadata(&file_path).await?;
         let file_size = metadata.len();
-        let file_hash = calculate_file_hash(&file_path).await?;
 
         let file_name = file_path
             .file_name()
@@ -341,7 +341,6 @@ impl TransferService {
             file_name: file_name.clone(),
             relative_path,
             file_size,
-            file_hash,
             chunk_size: self.chunk_size,
             device_id: String::new(),
             password_hash: None,
@@ -372,6 +371,7 @@ impl TransferService {
             .await;
 
         let mut file = tokio::fs::File::open(&file_path).await?;
+        let mut hasher = Sha256::new();
 
         for chunk_index in 0..total_chunks {
             if self.cancelled.read().await.contains(&file_id) {
@@ -385,9 +385,9 @@ impl TransferService {
             let remaining = file_size - offset;
             let read_size = (self.chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0u8; read_size];
-            let n = file.read(&mut buffer).await?;
-            buffer.truncate(n);
+            file.read_exact(&mut buffer).await?;
 
+            hasher.update(&buffer);
             let checksum = calculate_chunk_checksum(&buffer);
             let mut chunk = ChunkData {
                 file_id: file_id.clone(),
@@ -431,6 +431,15 @@ impl TransferService {
                 tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
             }
         }
+
+        let hash_result = hasher.finalize();
+        let mut file_hash = [0u8; 32];
+        file_hash.copy_from_slice(&hash_result);
+
+        Self::write_msg(&mut stream, &Message::TransferComplete(TransferComplete {
+            file_id: file_id.clone(),
+            file_hash,
+        })).await?;
 
         match Self::read_msg(&mut stream).await? {
             Message::TransferComplete(_) => {}

@@ -37,7 +37,6 @@ impl FileSender {
     pub async fn prepare(&self) -> Result<TransferRequest> {
         let metadata = tokio::fs::metadata(&self.file_path).await?;
         let file_size = metadata.len();
-        let file_hash = calculate_file_hash(&self.file_path).await?;
 
         let file_name = self
             .file_path
@@ -56,7 +55,6 @@ impl FileSender {
             file_name,
             relative_path: self.relative_path.clone(),
             file_size,
-            file_hash,
             chunk_size: self.chunk_size,
             device_id: String::new(),
             password_hash: None,
@@ -124,7 +122,6 @@ impl FileReceiver {
             request.file_id.clone(),
             file_path,
             request.file_size,
-            request.file_hash,
             request.chunk_size,
             temp_file_path.clone(),
         );
@@ -173,7 +170,7 @@ impl FileReceiver {
         Ok(())
     }
 
-    pub async fn finalize(&mut self) -> Result<()> {
+    pub async fn finalize(&mut self, expected_hash: [u8; 32]) -> Result<()> {
         if !self.state.is_complete() {
             return Err(anyhow::anyhow!("Transfer not complete"));
         }
@@ -184,7 +181,7 @@ impl FileReceiver {
         }
 
         let final_hash = calculate_file_hash(&self.state.temp_file_path).await?;
-        if final_hash != self.state.file_hash {
+        if final_hash != expected_hash {
             return Err(anyhow::anyhow!("File hash mismatch"));
         }
 

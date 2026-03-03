@@ -19,7 +19,6 @@ pub struct TransferRequest {
     pub file_name: String,
     pub relative_path: Option<String>,
     pub file_size: u64,
-    pub file_hash: [u8; 32],
     pub chunk_size: u32,
     pub device_id: String,
     pub password_hash: Option<String>,
@@ -91,6 +90,7 @@ pub struct ChunkAck {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferComplete {
     pub file_id: String,
+    pub file_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +132,6 @@ mod tests {
             file_name: "test.txt".to_string(),
             relative_path: Some("subdir/test.txt".to_string()),
             file_size: 1024,
-            file_hash: [0u8; 32],
             chunk_size: 1048576,
             device_id: "device-123".to_string(),
             password_hash: Some("hash123".to_string()),
@@ -175,7 +174,6 @@ mod tests {
             file_name: "file.txt".to_string(),
             relative_path: None,
             file_size: 100,
-            file_hash: [1u8; 32],
             chunk_size: 1024,
             device_id: "dev1".to_string(),
             password_hash: None,

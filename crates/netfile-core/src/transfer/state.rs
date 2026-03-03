@@ -7,7 +7,6 @@ pub struct TransferState {
     pub file_id: String,
     pub file_path: PathBuf,
     pub file_size: u64,
-    pub file_hash: [u8; 32],
     pub chunk_size: u32,
     pub total_chunks: u32,
     pub completed_chunks: HashSet<u32>,
@@ -19,7 +18,6 @@ impl TransferState {
         file_id: String,
         file_path: PathBuf,
         file_size: u64,
-        file_hash: [u8; 32],
         chunk_size: u32,
         temp_file_path: PathBuf,
     ) -> Self {
@@ -28,7 +26,6 @@ impl TransferState {
             file_id,
             file_path,
             file_size,
-            file_hash,
             chunk_size,
             total_chunks,
             completed_chunks: HashSet::new(),

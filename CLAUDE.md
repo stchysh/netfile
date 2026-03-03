@@ -231,6 +231,28 @@ feat: message 宏支持可选字段参数
 - 目的：形成团队记忆，避免同类问题重复出现
 - 记录格式：简明扼要，包含问题现象、根因、修复方式
 
+# WebView 渲染性能规范（Tauri 项目强制）
+
+编写或修改 Tauri + WebView 前端代码时，必须遵守以下规则：
+
+## 轮询频率
+- 禁止固定高频轮询：无活跃任务时 ≥ 2000ms，有活跃任务时 ≤ 500ms
+- 必须根据业务状态动态调整 interval，不得用同一频率覆盖所有场景
+
+## setState 调用
+- 禁止数据未变化时调用 setState，每次拿到新数据必须与上次比较，相同则跳过
+- 使用 `useRef` 缓存上次结果的 JSON.stringify 做比对
+
+## CSS transition / animation
+- 禁止在数据驱动的高频更新属性上使用 `transition`（如进度条宽度、数值文本）
+- `transition` 只允许用于用户交互触发的状态变化（hover、focus、点击）
+
+## 根因链（排查时对照）
+```
+高频 setInterval → 无条件 setState → React re-render → WebView repaint → GPU 持续工作
+```
+打断任意一环均可降低 GPU 占用，优先级：降低轮询频率 > 跳过无变化 setState > 移除高频 transition
+
 # 游戏功能大纲维护
 
 ## 规则

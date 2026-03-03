@@ -152,12 +152,15 @@ impl ProgressTracker {
 
     pub async fn list_all(&self) -> Vec<TransferProgress> {
         let progresses = self.progresses.read().await;
-        progresses.values().map(|p| {
+        progresses.iter().filter_map(|(key, p)| {
+            if key.starts_with("recv:") && progresses.contains_key(&key["recv:".len()..]) {
+                return None;
+            }
             let mut p = p.clone();
             p.speed = p.speed_bps();
             p.eta_secs = p.eta().as_secs();
             p.elapsed_secs = p.start_time.elapsed().as_secs();
-            p
+            Some(p)
         }).collect()
     }
 }

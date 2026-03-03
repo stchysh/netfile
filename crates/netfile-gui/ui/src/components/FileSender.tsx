@@ -110,7 +110,9 @@ function FileSender({ device, onClose }: Props) {
     setErrorMessage('')
     setSending(true)
     const targetAddr = `${device.ip}:${device.port}`
+    const minDelay = new Promise<void>((resolve) => setTimeout(resolve, 3000))
 
+    let sendError: string | null = null
     try {
       for (const file of selectedFiles) {
         await invoke('send_file', {
@@ -119,10 +121,17 @@ function FileSender({ device, onClose }: Props) {
           enableCompression,
         })
       }
-      onClose()
     } catch (error) {
-      setErrorMessage(`发送失败: ${error}`)
+      sendError = String(error)
+    }
+
+    await minDelay
+
+    if (sendError) {
+      setErrorMessage(`发送失败: ${sendError}`)
       setSending(false)
+    } else {
+      onClose()
     }
   }
 

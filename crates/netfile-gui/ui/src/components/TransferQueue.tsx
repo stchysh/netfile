@@ -77,7 +77,7 @@ function TransferQueue({ transfers }: Props) {
                   <div className="transfer-header-right">
                     <div className="transfer-progress-text">{progress}%</div>
                     <button
-                      className="cancel-button"
+                      className="transfer-cancel-button"
                       onClick={() => handleCancel(transfer.file_id)}
                       title="取消传输"
                     >

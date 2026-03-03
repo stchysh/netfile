@@ -122,11 +122,9 @@ function FileSender({ device, onClose }: Props) {
           enableCompression,
         })
       }
-      alert('文件发送成功！')
       onClose()
     } catch (error) {
       alert(`发送失败: ${error}`)
-    } finally {
       setSending(false)
     }
   }

@@ -26,16 +26,24 @@ async fn send_file(
     target_addr: String,
     file_path: String,
     enable_compression: bool,
-) -> Result<String, String> {
+) -> Result<(), String> {
     let addr = target_addr
         .parse()
         .map_err(|e| format!("Invalid address: {}", e))?;
 
-    state
-        .transfer_service
-        .send_file_compressed(PathBuf::from(file_path), addr, enable_compression)
-        .await
-        .map_err(|e| format!("Transfer failed: {}", e))
+    let path = PathBuf::from(&file_path);
+    if !path.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+
+    let transfer_service = state.transfer_service.clone();
+    tokio::spawn(async move {
+        if let Err(e) = transfer_service.send_file_compressed(path, addr, enable_compression).await {
+            tracing::error!("Transfer failed: {}", e);
+        }
+    });
+
+    Ok(())
 }
 
 #[tauri::command]

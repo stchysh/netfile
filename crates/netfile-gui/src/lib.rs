@@ -1,7 +1,7 @@
 use netfile_core::{Config, Device, DiscoveryService, TransferProgress, TransferService};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -24,41 +24,25 @@ async fn get_transfers(state: State<'_, AppState>) -> Result<Vec<TransferProgres
 #[tauri::command]
 async fn send_file(
     state: State<'_, AppState>,
-    app_handle: tauri::AppHandle,
     target_addr: String,
     file_path: String,
     enable_compression: bool,
 ) -> Result<(), String> {
     let addr = target_addr
         .parse()
-        .map_err(|e| format!("Invalid address: {}", e))?;
+        .map_err(|e| format!("无效地址: {}", e))?;
 
     let path = PathBuf::from(&file_path);
     if !path.exists() {
-        return Err(format!("File not found: {}", file_path));
+        return Err(format!("文件不存在: {}", file_path));
     }
 
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let transfer_service = state.transfer_service.clone();
-    tokio::spawn(async move {
-        let _ = app_handle.emit("transfer-started", file_name.clone());
-        match transfer_service.send_file_compressed(path, addr, enable_compression).await {
-            Ok(_) => {
-                let _ = app_handle.emit("transfer-complete", file_name);
-            }
-            Err(e) => {
-                tracing::error!("Transfer failed: {}", e);
-                let _ = app_handle.emit("transfer-error", e.to_string());
-            }
-        }
-    });
-
-    Ok(())
+    state
+        .transfer_service
+        .send_file_compressed(path, addr, enable_compression)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

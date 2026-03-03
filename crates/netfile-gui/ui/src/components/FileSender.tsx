@@ -108,6 +108,7 @@ function FileSender({ device, onClose }: Props) {
   }
 
   const handleSend = async () => {
+    console.log('[handleSend] called, selectedFiles:', selectedFiles)
     if (selectedFiles.length === 0) {
       setErrorMessage('请先选择文件或文件夹')
       return
@@ -124,6 +125,7 @@ function FileSender({ device, onClose }: Props) {
     let sendError: string | null = null
     try {
       for (const file of selectedFiles) {
+        console.log('[handleSend] invoking send_file:', file.path, '->', targetAddr)
         addLog(`发送文件: ${file.path}`)
         await invoke('send_file', {
           targetAddr,
@@ -134,6 +136,7 @@ function FileSender({ device, onClose }: Props) {
       }
     } catch (error) {
       sendError = String(error)
+      console.log('[handleSend] error:', sendError)
       addLog(`错误: ${sendError}`)
     }
 

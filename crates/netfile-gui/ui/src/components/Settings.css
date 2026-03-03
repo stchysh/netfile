@@ -122,7 +122,45 @@
 .form-group input[type='range'] {
   width: 100%;
   cursor: pointer;
-  accent-color: #3498db;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: #dde3ea;
+  border-radius: 3px;
+  outline: none;
+  margin: 6px 0;
+}
+
+.form-group input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  transition: background-color 0.15s;
+}
+
+.form-group input[type='range']::-webkit-slider-thumb:hover {
+  background: #2980b9;
+}
+
+.form-group input[type='range']::-moz-range-track {
+  height: 6px;
+  background: #dde3ea;
+  border-radius: 3px;
+}
+
+.form-group input[type='range']::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
 .dir-input-row {

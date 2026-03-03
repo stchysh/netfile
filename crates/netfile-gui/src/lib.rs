@@ -1,8 +1,9 @@
 use netfile_core::{Config, Device, DiscoveryService, TransferProgress, TransferService};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
@@ -23,6 +24,7 @@ async fn get_transfers(state: State<'_, AppState>) -> Result<Vec<TransferProgres
 #[tauri::command]
 async fn send_file(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     target_addr: String,
     file_path: String,
     enable_compression: bool,
@@ -40,6 +42,7 @@ async fn send_file(
     tokio::spawn(async move {
         if let Err(e) = transfer_service.send_file_compressed(path, addr, enable_compression).await {
             tracing::error!("Transfer failed: {}", e);
+            let _ = app_handle.emit("transfer-error", e.to_string());
         }
     });
 
@@ -123,11 +126,13 @@ pub fn run() {
 
                 let transfer_port = transfer_service.local_port();
 
+                let session_instance_id = Uuid::new_v4().to_string();
+
                 let discovery_service = Arc::new(
                     DiscoveryService::new(
                         config.network.discovery_port,
                         config.instance.instance_id.clone(),
-                        config.instance.instance_id.clone(),
+                        session_instance_id,
                         config.instance.device_name.clone(),
                         config.instance.instance_name.clone(),
                         transfer_port,

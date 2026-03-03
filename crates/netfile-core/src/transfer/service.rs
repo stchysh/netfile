@@ -201,13 +201,14 @@ impl TransferService {
         .await?;
 
         let file_id = receiver.file_id().to_string();
+        let progress_id = format!("recv:{}", file_id);
         let resume_from_chunk = receiver.resume_from_chunk();
         let total_chunks = ((request.file_size + request.chunk_size as u64 - 1)
             / request.chunk_size as u64) as u32;
 
         self.progress_tracker
             .start_transfer(
-                file_id.clone(),
+                progress_id.clone(),
                 request.file_name.clone(),
                 request.file_size,
                 total_chunks,
@@ -228,7 +229,7 @@ impl TransferService {
             let (chunk_index, compressed, data) = match Self::read_chunk_raw(&mut stream).await {
                 Ok(r) => r,
                 Err(e) => {
-                    self.progress_tracker.remove_progress(&file_id).await;
+                    self.progress_tracker.remove_progress(&progress_id).await;
                     return Err(e);
                 }
             };
@@ -249,7 +250,7 @@ impl TransferService {
                             file_id: file_id.clone(),
                             error: e.to_string(),
                         })).await;
-                        self.progress_tracker.remove_progress(&file_id).await;
+                        self.progress_tracker.remove_progress(&progress_id).await;
                         return Err(e.into());
                     }
                 }
@@ -263,22 +264,22 @@ impl TransferService {
                     file_id: file_id.clone(),
                     error: e.to_string(),
                 })).await;
-                self.progress_tracker.remove_progress(&file_id).await;
+                self.progress_tracker.remove_progress(&progress_id).await;
                 return Err(e);
             }
 
-            self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
+            self.progress_tracker.update_progress(&progress_id, chunk_bytes_len).await;
         }
 
         let tc = match Self::read_msg(&mut stream).await {
             Ok(Message::TransferComplete(tc)) => tc,
             Ok(_) => {
                 warn!("Expected TransferComplete but got unexpected message");
-                self.progress_tracker.remove_progress(&file_id).await;
+                self.progress_tracker.remove_progress(&progress_id).await;
                 return Ok(());
             }
             Err(e) => {
-                self.progress_tracker.remove_progress(&file_id).await;
+                self.progress_tracker.remove_progress(&progress_id).await;
                 return Err(e);
             }
         };
@@ -296,12 +297,12 @@ impl TransferService {
                     file_id: file_id.clone(),
                     error: e.to_string(),
                 })).await;
-                self.progress_tracker.remove_progress(&file_id).await;
+                self.progress_tracker.remove_progress(&progress_id).await;
                 return Err(e);
             }
         }
 
-        self.progress_tracker.remove_progress(&file_id).await;
+        self.progress_tracker.remove_progress(&progress_id).await;
 
         Ok(())
     }

@@ -1,11 +1,12 @@
-use super::file_utils::{calculate_chunk_checksum, calculate_file_hash, read_file_chunk};
+use super::file_utils::{calculate_chunk_checksum, read_file_chunk};
 use super::state::TransferState;
 use crate::protocol::{ChunkData, TransferRequest};
 use anyhow::Result;
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -93,6 +94,7 @@ pub struct FileReceiver {
     temp_file: Option<File>,
     data_dir: PathBuf,
     resume_from_chunk: u32,
+    hasher: Sha256,
 }
 
 impl FileReceiver {
@@ -125,6 +127,24 @@ impl FileReceiver {
                         .open(&temp_file_path)
                         .await?;
 
+                    let mut hasher = Sha256::new();
+                    let skip_bytes = (resume_from as u64 * existing_state.chunk_size as u64)
+                        .min(existing_state.file_size);
+                    if skip_bytes > 0 {
+                        let mut read_file = File::open(&temp_file_path).await?;
+                        let mut buf = vec![0u8; 4 * 1024 * 1024];
+                        let mut remaining = skip_bytes;
+                        while remaining > 0 {
+                            let to_read = remaining.min(buf.len() as u64) as usize;
+                            let n = read_file.read(&mut buf[..to_read]).await?;
+                            if n == 0 {
+                                break;
+                            }
+                            hasher.update(&buf[..n]);
+                            remaining -= n as u64;
+                        }
+                    }
+
                     info!(
                         "Resuming file transfer: {} from chunk {} ({} chunks done)",
                         request.file_name,
@@ -137,6 +157,7 @@ impl FileReceiver {
                         temp_file: Some(temp_file),
                         data_dir,
                         resume_from_chunk: resume_from,
+                        hasher,
                     });
                 }
             }
@@ -177,6 +198,7 @@ impl FileReceiver {
             temp_file: Some(temp_file),
             data_dir,
             resume_from_chunk: 0,
+            hasher: Sha256::new(),
         })
     }
 
@@ -197,6 +219,7 @@ impl FileReceiver {
             file.write_all(chunk.data.as_ref()).await?;
         }
 
+        self.hasher.update(chunk.data.as_ref());
         self.state.completed_chunks.insert(chunk.chunk_index);
 
         debug!(
@@ -221,6 +244,7 @@ impl FileReceiver {
             file.write_all(data).await?;
         }
 
+        self.hasher.update(data);
         self.state.completed_chunks.insert(chunk_index);
 
         if self.state.completed_chunks.len() % 32 == 0 {
@@ -252,7 +276,10 @@ impl FileReceiver {
             drop(file);
         }
 
-        let final_hash = calculate_file_hash(&self.state.temp_file_path).await?;
+        let final_hash_result = self.hasher.clone().finalize();
+        let mut final_hash = [0u8; 32];
+        final_hash.copy_from_slice(&final_hash_result);
+
         if final_hash != expected_hash {
             let _ = tokio::fs::remove_file(&self.state.temp_file_path).await;
             let state_path = TransferState::state_file_path(&self.data_dir, &self.state.file_id);

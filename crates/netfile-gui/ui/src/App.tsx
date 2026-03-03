@@ -25,6 +25,7 @@ interface Transfer {
   completed_chunks: number
   speed: number
   eta_secs: number
+  elapsed_secs: number
   direction: string
 }
 

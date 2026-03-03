@@ -10,6 +10,7 @@ interface Transfer {
   completed_chunks: number
   speed: number
   eta_secs: number
+  elapsed_secs: number
   direction: string
 }
 
@@ -31,6 +32,13 @@ function TransferQueue({ transfers }: Props) {
   }
 
   const formatEta = (secs: number): string => {
+    if (secs === 0) return ''
+    if (secs >= 3600) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
+    if (secs >= 60) return `${Math.floor(secs / 60)}m ${secs % 60}s`
+    return `${secs}s`
+  }
+
+  const formatElapsed = (secs: number): string => {
     if (secs === 0) return ''
     if (secs >= 3600) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
     if (secs >= 60) return `${Math.floor(secs / 60)}m ${secs % 60}s`
@@ -65,6 +73,7 @@ function TransferQueue({ transfers }: Props) {
           transfers.map((transfer) => {
             const progress = calculateProgress(transfer.transferred, transfer.total_size)
             const eta = formatEta(transfer.eta_secs)
+            const elapsed = formatElapsed(transfer.elapsed_secs)
             return (
               <div key={transfer.file_id} className="transfer-item">
                 <div className="transfer-header">
@@ -101,6 +110,9 @@ function TransferQueue({ transfers }: Props) {
                     )}
                     {eta && (
                       <span className="transfer-eta">剩余 {eta}</span>
+                    )}
+                    {elapsed && (
+                      <span className="transfer-elapsed">已用 {elapsed}</span>
                     )}
                   </span>
                 </div>

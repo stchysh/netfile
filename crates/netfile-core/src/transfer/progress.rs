@@ -12,6 +12,7 @@ pub struct TransferProgress {
     pub completed_chunks: u32,
     pub speed: f64,
     pub eta_secs: u64,
+    pub elapsed_secs: u64,
     pub direction: String,
     #[serde(skip)]
     pub start_time: Instant,
@@ -31,6 +32,7 @@ impl TransferProgress {
             completed_chunks: 0,
             speed: 0.0,
             eta_secs: 0,
+            elapsed_secs: 0,
             direction,
             start_time: now,
             last_update: now,
@@ -154,6 +156,7 @@ impl ProgressTracker {
             let mut p = p.clone();
             p.speed = p.speed_bps();
             p.eta_secs = p.eta().as_secs();
+            p.elapsed_secs = p.start_time.elapsed().as_secs();
             p
         }).collect()
     }

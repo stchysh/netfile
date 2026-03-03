@@ -232,6 +232,15 @@
   border-radius: 6px;
 }
 
+.success-message {
+  color: #1a7f37;
+  font-size: 0.875rem;
+  padding: 0.5rem 0.75rem;
+  background-color: #f0fff4;
+  border: 1px solid #b7ebc8;
+  border-radius: 6px;
+}
+
 .footer-buttons {
   display: flex;
   justify-content: flex-end;

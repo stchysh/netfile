@@ -27,7 +27,7 @@ interface SelectedFile {
 function FileSender({ device, onClose }: Props) {
   const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([])
   const [enableCompression, setEnableCompression] = useState(false)
-  const [sending, setSending] = useState(false)
+  const [sendState, setSendState] = useState<'idle' | 'sending' | 'success' | 'error'>('idle')
   const [dragOver, setDragOver] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
 
@@ -108,7 +108,7 @@ function FileSender({ device, onClose }: Props) {
     }
 
     setErrorMessage('')
-    setSending(true)
+    setSendState('sending')
     const targetAddr = `${device.ip}:${device.port}`
     const minDelay = new Promise<void>((resolve) => setTimeout(resolve, 3000))
 
@@ -128,9 +128,11 @@ function FileSender({ device, onClose }: Props) {
     await minDelay
 
     if (sendError) {
-      setErrorMessage(`发送失败: ${sendError}`)
-      setSending(false)
+      setErrorMessage(sendError)
+      setSendState('error')
     } else {
+      setSendState('success')
+      await new Promise<void>((resolve) => setTimeout(resolve, 1500))
       onClose()
     }
   }
@@ -230,19 +232,24 @@ function FileSender({ device, onClose }: Props) {
         </div>
 
         <div className="modal-footer">
-          {errorMessage && (
+          {sendState === 'error' && errorMessage && (
             <div className="error-message">{errorMessage}</div>
           )}
+          {sendState === 'success' && (
+            <div className="success-message">发送成功，文件已保存到对方的 Downloads/NetFile 目录</div>
+          )}
           <div className="footer-buttons">
-            <button className="cancel-button" onClick={onClose} disabled={sending}>
+            <button className="cancel-button" onClick={onClose} disabled={sendState === 'sending' || sendState === 'success'}>
               取消
             </button>
             <button
               className="send-button"
               onClick={handleSend}
-              disabled={sending}
+              disabled={sendState === 'sending' || sendState === 'success'}
             >
-              {sending ? '发送中...' : `发送${selectedFiles.length > 0 ? ` (${selectedFiles.length})` : ''}`}
+              {sendState === 'sending' && '发送中...'}
+              {sendState === 'success' && '发送成功'}
+              {(sendState === 'idle' || sendState === 'error') && `发送${selectedFiles.length > 0 ? ` (${selectedFiles.length})` : ''}`}
             </button>
           </div>
         </div>

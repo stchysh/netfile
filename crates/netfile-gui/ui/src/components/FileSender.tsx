@@ -58,6 +58,8 @@ function FileSender({ device, onClose }: Props) {
         directory: false,
       })
 
+      console.log('Selected files:', selected)
+
       if (selected) {
         const files = Array.isArray(selected) ? selected : [selected]
         const newFiles: SelectedFile[] = []
@@ -71,10 +73,12 @@ function FileSender({ device, onClose }: Props) {
           })
         }
 
+        console.log('Adding files:', newFiles)
         setSelectedFiles([...selectedFiles, ...newFiles])
       }
     } catch (error) {
       console.error('Failed to select file:', error)
+      alert(`选择文件失败: ${error}`)
     }
   }
 
@@ -84,6 +88,8 @@ function FileSender({ device, onClose }: Props) {
         multiple: false,
         directory: true,
       })
+
+      console.log('Selected folder:', selected)
 
       if (selected) {
         const name = selected.split(/[\\/]/).pop() || selected
@@ -98,6 +104,7 @@ function FileSender({ device, onClose }: Props) {
       }
     } catch (error) {
       console.error('Failed to select folder:', error)
+      alert(`选择文件夹失败: ${error}`)
     }
   }
 

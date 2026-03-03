@@ -10,7 +10,7 @@ tauri-build = { version = "2.0", features = ["config-json5"] }
 
 [dependencies]
 netfile-core = { path = "../netfile-core" }
-tauri = { version = "2.0", features = [] }
+tauri = { version = "2.0", features = ["protocol-asset"] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.0"
 serde.workspace = true

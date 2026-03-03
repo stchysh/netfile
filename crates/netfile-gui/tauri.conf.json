@@ -14,7 +14,7 @@
         "width": 1200,
         "height": 800,
         "resizable": true,
-        "fileDropEnabled": true
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -22,6 +22,13 @@
         "enable": true,
         "scope": ["**"]
       }
+    }
+  },
+  "plugins": {
+    "dialog": {
+      "all": true,
+      "open": true,
+      "save": true
     }
   }
 }

@@ -10,6 +10,9 @@ pub struct TransferProgress {
     pub transferred: u64,
     pub total_chunks: u32,
     pub completed_chunks: u32,
+    pub speed: f64,
+    pub eta_secs: u64,
+    pub direction: String,
     #[serde(skip)]
     pub start_time: Instant,
     #[serde(skip)]
@@ -17,7 +20,7 @@ pub struct TransferProgress {
 }
 
 impl TransferProgress {
-    pub fn new(file_id: String, file_name: String, total_size: u64, total_chunks: u32) -> Self {
+    pub fn new(file_id: String, file_name: String, total_size: u64, total_chunks: u32, direction: String) -> Self {
         let now = Instant::now();
         Self {
             file_id,
@@ -26,6 +29,9 @@ impl TransferProgress {
             transferred: 0,
             total_chunks,
             completed_chunks: 0,
+            speed: 0.0,
+            eta_secs: 0,
+            direction,
             start_time: now,
             last_update: now,
         }
@@ -122,8 +128,9 @@ impl ProgressTracker {
         file_name: String,
         total_size: u64,
         total_chunks: u32,
+        direction: String,
     ) {
-        let progress = TransferProgress::new(file_id.clone(), file_name, total_size, total_chunks);
+        let progress = TransferProgress::new(file_id.clone(), file_name, total_size, total_chunks, direction);
         self.progresses.write().await.insert(file_id, progress);
     }
 
@@ -142,6 +149,12 @@ impl ProgressTracker {
     }
 
     pub async fn list_all(&self) -> Vec<TransferProgress> {
-        self.progresses.read().await.values().cloned().collect()
+        let progresses = self.progresses.read().await;
+        progresses.values().map(|p| {
+            let mut p = p.clone();
+            p.speed = p.speed_bps();
+            p.eta_secs = p.eta().as_secs();
+            p
+        }).collect()
     }
 }

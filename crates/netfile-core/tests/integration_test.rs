@@ -62,6 +62,7 @@ async fn test_progress_tracker() {
             "test.txt".to_string(),
             1000,
             10,
+            "send".to_string(),
         )
         .await;
 

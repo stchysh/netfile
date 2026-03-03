@@ -3,7 +3,7 @@ use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
 use crate::protocol::{ChunkAck, ChunkData, Message, TransferRequest, TransferResponse};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub struct TransferService {
     active_senders: Arc<RwLock<HashMap<String, FileSender>>>,
     active_receivers: Arc<RwLock<HashMap<String, FileReceiver>>>,
     progress_tracker: Arc<ProgressTracker>,
+    cancelled: Arc<RwLock<HashSet<String>>>,
     data_dir: PathBuf,
     download_dir: PathBuf,
     chunk_size: u32,
@@ -60,6 +61,7 @@ impl TransferService {
             active_senders: Arc::new(RwLock::new(HashMap::new())),
             active_receivers: Arc::new(RwLock::new(HashMap::new())),
             progress_tracker: Arc::new(ProgressTracker::new()),
+            cancelled: Arc::new(RwLock::new(HashSet::new())),
             data_dir,
             download_dir,
             chunk_size,
@@ -167,6 +169,19 @@ impl TransferService {
             .await
             .insert(file_id.clone(), receiver);
 
+        let total_chunks = ((request.file_size + request.chunk_size as u64 - 1)
+            / request.chunk_size as u64) as u32;
+
+        self.progress_tracker
+            .start_transfer(
+                file_id.clone(),
+                request.file_name.clone(),
+                request.file_size,
+                total_chunks,
+                "receive".to_string(),
+            )
+            .await;
+
         let response = TransferResponse {
             file_id: file_id.clone(),
             accepted: true,
@@ -209,28 +224,41 @@ impl TransferService {
             }
         }
 
-        let mut receivers = self.active_receivers.write().await;
-        if let Some(receiver) = receivers.get_mut(&file_id) {
-            receiver.write_chunk(chunk).await?;
+        let chunk_size = chunk.data.len() as u64;
+        let mut is_complete = false;
 
-            let ack = Message::ChunkAck(ChunkAck {
-                file_id: file_id.clone(),
-                chunk_index,
-            });
-            let ack_data = ack.to_bytes()?;
-            let len = (ack_data.len() as u32).to_be_bytes();
+        {
+            let mut receivers = self.active_receivers.write().await;
+            if let Some(receiver) = receivers.get_mut(&file_id) {
+                receiver.write_chunk(chunk).await?;
 
-            stream.write_all(&len).await?;
-            stream.write_all(&ack_data).await?;
-            stream.flush().await?;
+                let ack = Message::ChunkAck(ChunkAck {
+                    file_id: file_id.clone(),
+                    chunk_index,
+                });
+                let ack_data = ack.to_bytes()?;
+                let len = (ack_data.len() as u32).to_be_bytes();
 
-            if receiver.is_complete() {
-                receiver.finalize().await?;
-                receivers.remove(&file_id);
-                info!("Transfer completed for file: {}", file_id);
+                stream.write_all(&len).await?;
+                stream.write_all(&ack_data).await?;
+                stream.flush().await?;
+
+                if receiver.is_complete() {
+                    is_complete = true;
+                    receiver.finalize().await?;
+                    receivers.remove(&file_id);
+                    info!("Transfer completed for file: {}", file_id);
+                }
+            } else {
+                warn!("Received chunk for unknown file: {}", file_id);
+                return Ok(());
             }
-        } else {
-            warn!("Received chunk for unknown file: {}", file_id);
+        }
+
+        self.progress_tracker.update_progress(&file_id, chunk_size).await;
+
+        if is_complete {
+            self.progress_tracker.remove_progress(&file_id).await;
         }
 
         Ok(())
@@ -263,7 +291,7 @@ impl TransferService {
     }
 
     pub async fn send_file(&self, file_path: PathBuf, target_addr: SocketAddr) -> Result<String> {
-        self.send_file_with_relative_path(file_path, None, target_addr).await
+        self.do_send_file(file_path, None, target_addr, self.enable_compression).await
     }
 
     pub async fn send_file_with_relative_path(
@@ -271,6 +299,25 @@ impl TransferService {
         file_path: PathBuf,
         relative_path: Option<String>,
         target_addr: SocketAddr,
+    ) -> Result<String> {
+        self.do_send_file(file_path, relative_path, target_addr, self.enable_compression).await
+    }
+
+    pub async fn send_file_compressed(
+        &self,
+        file_path: PathBuf,
+        target_addr: SocketAddr,
+        enable_compression: bool,
+    ) -> Result<String> {
+        self.do_send_file(file_path, None, target_addr, enable_compression).await
+    }
+
+    async fn do_send_file(
+        &self,
+        file_path: PathBuf,
+        relative_path: Option<String>,
+        target_addr: SocketAddr,
+        enable_compression: bool,
     ) -> Result<String> {
         let mut sender = FileSender::new(file_path.clone(), self.chunk_size, self.data_dir.clone());
         if let Some(rel_path) = relative_path {
@@ -324,10 +371,19 @@ impl TransferService {
                 request.file_name.clone(),
                 request.file_size,
                 total_chunks,
+                "send".to_string(),
             )
             .await;
 
         for chunk_index in 0..total_chunks {
+            if self.cancelled.read().await.contains(&file_id) {
+                self.active_senders.write().await.remove(&file_id);
+                self.progress_tracker.remove_progress(&file_id).await;
+                self.cancelled.write().await.remove(&file_id);
+                info!("Transfer cancelled: {}", file_id);
+                return Ok(file_id);
+            }
+
             let chunk = {
                 let senders = self.active_senders.read().await;
                 let sender = senders
@@ -338,7 +394,7 @@ impl TransferService {
 
             let mut chunk = chunk;
 
-            if self.enable_compression && chunk.data.len() > 1024 {
+            if enable_compression && chunk.data.len() > 1024 {
                 match crate::compression::Compressor::compress(chunk.data.as_ref()) {
                     Ok(compressed) if compressed.len() < chunk.data.len() => {
                         debug!(
@@ -392,6 +448,10 @@ impl TransferService {
         Ok(file_id)
     }
 
+    pub async fn cancel_transfer(&self, file_id: &str) {
+        self.cancelled.write().await.insert(file_id.to_string());
+    }
+
     pub fn progress_tracker(&self) -> Arc<ProgressTracker> {
         self.progress_tracker.clone()
     }
@@ -414,6 +474,7 @@ impl Clone for TransferService {
             active_senders: self.active_senders.clone(),
             active_receivers: self.active_receivers.clone(),
             progress_tracker: self.progress_tracker.clone(),
+            cancelled: self.cancelled.clone(),
             data_dir: self.data_dir.clone(),
             download_dir: self.download_dir.clone(),
             chunk_size: self.chunk_size,

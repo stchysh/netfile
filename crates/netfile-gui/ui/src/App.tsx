@@ -21,7 +21,11 @@ interface Transfer {
   file_name: string
   total_size: number
   transferred: number
+  total_chunks: number
+  completed_chunks: number
   speed: number
+  eta_secs: number
+  direction: string
 }
 
 function App() {

@@ -25,6 +25,7 @@ async fn send_file(
     state: State<'_, AppState>,
     target_addr: String,
     file_path: String,
+    enable_compression: bool,
 ) -> Result<String, String> {
     let addr = target_addr
         .parse()
@@ -32,9 +33,18 @@ async fn send_file(
 
     state
         .transfer_service
-        .send_file(PathBuf::from(file_path), addr)
+        .send_file_compressed(PathBuf::from(file_path), addr, enable_compression)
         .await
         .map_err(|e| format!("Transfer failed: {}", e))
+}
+
+#[tauri::command]
+async fn cancel_transfer(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<(), String> {
+    state.transfer_service.cancel_transfer(&file_id).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -63,6 +73,7 @@ pub fn run() {
             get_devices,
             get_transfers,
             send_file,
+            cancel_transfer,
             get_config,
             update_config,
         ])

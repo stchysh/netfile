@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import { listen } from '@tauri-apps/api/event'
 import './FileSender.css'
 
 interface Device {
@@ -28,6 +29,25 @@ function FileSender({ device, onClose }: Props) {
   const [enableCompression, setEnableCompression] = useState(false)
   const [sending, setSending] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+
+  useEffect(() => {
+    const unlisten = listen<string[]>('tauri://drag-drop', (event) => {
+      const paths = event.payload
+      const newFiles: SelectedFile[] = paths.map((path) => {
+        const name = path.split(/[\\/]/).pop() || path
+        return {
+          path,
+          name,
+          size: 0,
+        }
+      })
+      setSelectedFiles((prev) => [...prev, ...newFiles])
+    })
+
+    return () => {
+      unlisten.then((fn) => fn())
+    }
+  }, [])
 
   if (!device) return null
 
@@ -124,10 +144,6 @@ function FileSender({ device, onClose }: Props) {
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
     setDragOver(false)
-
-    // Note: File drop handling in Tauri requires additional setup
-    // This is a placeholder for the UI
-    alert('拖拽功能需要额外配置，请使用"添加文件"按钮')
   }
 
   const formatSize = (bytes: number): string => {

@@ -13,8 +13,15 @@
         "title": "NetFile",
         "width": 1200,
         "height": 800,
-        "resizable": true
+        "resizable": true,
+        "fileDropEnabled": true
       }
-    ]
+    ],
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
   }
 }

@@ -28,21 +28,56 @@ async fn send_file(
     file_path: String,
     enable_compression: bool,
 ) -> Result<(), String> {
-    let addr = target_addr
-        .parse()
-        .map_err(|e| format!("无效地址: {}", e))?;
+    use std::io::Write;
+    let log_path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("netfile_debug.log");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    let mut wlog = |s: &str| {
+        if let Some(ref mut f) = log_file {
+            let _ = writeln!(f, "{}", s);
+        }
+    };
+
+    wlog(&format!("=== send_file called ==="));
+    wlog(&format!("target_addr: {}", target_addr));
+    wlog(&format!("file_path: {}", file_path));
+
+    let addr = match target_addr.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            let msg = format!("无效地址: {}", e);
+            wlog(&format!("ERROR: {}", msg));
+            return Err(msg);
+        }
+    };
 
     let path = PathBuf::from(&file_path);
     if !path.exists() {
-        return Err(format!("文件不存在: {}", file_path));
+        let msg = format!("文件不存在: {}", file_path);
+        wlog(&format!("ERROR: {}", msg));
+        return Err(msg);
     }
 
-    state
+    wlog("文件存在，开始传输...");
+
+    let result = state
         .transfer_service
         .send_file_compressed(path, addr, enable_compression)
         .await
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(_) => wlog("传输成功"),
+        Err(e) => wlog(&format!("传输失败: {}", e)),
+    }
+
+    result
 }
 
 #[tauri::command]

@@ -29,20 +29,24 @@ function FileSender({ device, onClose }: Props) {
   const [enableCompression, setEnableCompression] = useState(false)
   const [sending, setSending] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
 
   useEffect(() => {
-    const unlisten = listen<string[]>('tauri://drag-drop', (event) => {
-      const paths = event.payload
-      const newFiles: SelectedFile[] = paths.map((path) => {
-        const name = path.split(/[\\/]/).pop() || path
-        return {
-          path,
-          name,
-          size: 0,
-        }
-      })
-      setSelectedFiles((prev) => [...prev, ...newFiles])
-    })
+    const unlisten = listen<{ paths: string[]; position: unknown } | string[]>(
+      'tauri://drag-drop',
+      (event) => {
+        const payload = event.payload
+        const paths: string[] = Array.isArray(payload)
+          ? payload
+          : (payload as { paths: string[] }).paths ?? []
+
+        const newFiles: SelectedFile[] = paths.map((path) => {
+          const name = path.split(/[\\/]/).pop() || path
+          return { path, name, size: 0 }
+        })
+        setSelectedFiles((prev) => [...prev, ...newFiles])
+      },
+    )
 
     return () => {
       unlisten.then((fn) => fn())
@@ -52,6 +56,7 @@ function FileSender({ device, onClose }: Props) {
   if (!device) return null
 
   const handleSelectFile = async () => {
+    setErrorMessage('')
     try {
       const selected = await open({
         multiple: true,
@@ -60,25 +65,20 @@ function FileSender({ device, onClose }: Props) {
 
       if (selected) {
         const files = Array.isArray(selected) ? selected : [selected]
-        const newFiles: SelectedFile[] = []
-
-        for (const path of files) {
-          const name = path.split(/[\\/]/).pop() || path
-          newFiles.push({
-            path,
-            name,
-            size: 0,
-          })
-        }
-
-        setSelectedFiles([...selectedFiles, ...newFiles])
+        const newFiles: SelectedFile[] = files.map((path) => ({
+          path,
+          name: path.split(/[\\/]/).pop() || path,
+          size: 0,
+        }))
+        setSelectedFiles((prev) => [...prev, ...newFiles])
       }
     } catch (error) {
-      alert(`选择文件失败: ${error}`)
+      setErrorMessage(`选择文件失败: ${error}`)
     }
   }
 
   const handleSelectFolder = async () => {
+    setErrorMessage('')
     try {
       const selected = await open({
         multiple: false,
@@ -87,30 +87,27 @@ function FileSender({ device, onClose }: Props) {
 
       if (selected) {
         const name = selected.split(/[\\/]/).pop() || selected
-        setSelectedFiles([
-          ...selectedFiles,
-          {
-            path: selected,
-            name: `${name}/`,
-            size: 0,
-          },
+        setSelectedFiles((prev) => [
+          ...prev,
+          { path: selected, name: `${name}/`, size: 0 },
         ])
       }
     } catch (error) {
-      alert(`选择文件夹失败: ${error}`)
+      setErrorMessage(`选择文件夹失败: ${error}`)
     }
   }
 
   const handleRemoveFile = (index: number) => {
-    setSelectedFiles(selectedFiles.filter((_, i) => i !== index))
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
   const handleSend = async () => {
     if (selectedFiles.length === 0) {
-      alert('请先选择文件')
+      setErrorMessage('请先选择文件或文件夹')
       return
     }
 
+    setErrorMessage('')
     setSending(true)
     const targetAddr = `${device.ip}:${device.port}`
 
@@ -124,7 +121,7 @@ function FileSender({ device, onClose }: Props) {
       }
       onClose()
     } catch (error) {
-      alert(`发送失败: ${error}`)
+      setErrorMessage(`发送失败: ${error}`)
       setSending(false)
     }
   }
@@ -139,17 +136,9 @@ function FileSender({ device, onClose }: Props) {
     setDragOver(false)
   }
 
-  const handleDrop = async (e: React.DragEvent) => {
+  const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     setDragOver(false)
-  }
-
-  const formatSize = (bytes: number): string => {
-    if (bytes === 0) return '未知大小'
-    const k = 1024
-    const sizes = ['B', 'KB', 'MB', 'GB']
-    const i = Math.floor(Math.log(bytes) / Math.log(k))
-    return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`
   }
 
   return (
@@ -196,9 +185,6 @@ function FileSender({ device, onClose }: Props) {
                       </span>
                       <div className="file-details">
                         <div className="file-name">{file.name}</div>
-                        {file.size > 0 && (
-                          <div className="file-size">{formatSize(file.size)}</div>
-                        )}
                       </div>
                     </div>
                     <button
@@ -235,16 +221,21 @@ function FileSender({ device, onClose }: Props) {
         </div>
 
         <div className="modal-footer">
-          <button className="cancel-button" onClick={onClose} disabled={sending}>
-            取消
-          </button>
-          <button
-            className="send-button"
-            onClick={handleSend}
-            disabled={sending || selectedFiles.length === 0}
-          >
-            {sending ? '发送中...' : '发送'}
-          </button>
+          {errorMessage && (
+            <div className="error-message">{errorMessage}</div>
+          )}
+          <div className="footer-buttons">
+            <button className="cancel-button" onClick={onClose} disabled={sending}>
+              取消
+            </button>
+            <button
+              className="send-button"
+              onClick={handleSend}
+              disabled={sending}
+            >
+              {sending ? '发送中...' : `发送${selectedFiles.length > 0 ? ` (${selectedFiles.length})` : ''}`}
+            </button>
+          </div>
         </div>
       </div>
     </div>

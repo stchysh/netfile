@@ -217,10 +217,25 @@
 
 .modal-footer {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
   gap: 0.75rem;
   padding: 1.5rem;
   border-top: 1px solid #e0e0e0;
+}
+
+.error-message {
+  color: #e74c3c;
+  font-size: 0.875rem;
+  padding: 0.5rem 0.75rem;
+  background-color: #fdf2f2;
+  border: 1px solid #f5c6cb;
+  border-radius: 6px;
+}
+
+.footer-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
 }
 
 .cancel-button,

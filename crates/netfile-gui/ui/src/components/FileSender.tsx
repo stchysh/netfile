@@ -30,6 +30,12 @@ function FileSender({ device, onClose }: Props) {
   const [sendState, setSendState] = useState<'idle' | 'sending' | 'success' | 'error'>('idle')
   const [dragOver, setDragOver] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+  const [logs, setLogs] = useState<string[]>([])
+
+  const addLog = (msg: string) => {
+    const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    setLogs((prev) => [...prev, `[${time}] ${msg}`])
+  }
 
   useEffect(() => {
     const unlisten = listen<{ paths: string[]; position: unknown } | string[]>(
@@ -108,29 +114,37 @@ function FileSender({ device, onClose }: Props) {
     }
 
     setErrorMessage('')
+    setLogs([])
     setSendState('sending')
     const targetAddr = `${device.ip}:${device.port}`
+    addLog(`开始发送，目标: ${targetAddr}`)
+    addLog(`文件数: ${selectedFiles.length}`)
     const minDelay = new Promise<void>((resolve) => setTimeout(resolve, 3000))
 
     let sendError: string | null = null
     try {
       for (const file of selectedFiles) {
+        addLog(`发送文件: ${file.path}`)
         await invoke('send_file', {
           targetAddr,
           filePath: file.path,
           enableCompression,
         })
+        addLog(`文件发送完成: ${file.name}`)
       }
     } catch (error) {
       sendError = String(error)
+      addLog(`错误: ${sendError}`)
     }
 
+    addLog('等待最短显示时间...')
     await minDelay
 
     if (sendError) {
       setErrorMessage(sendError)
       setSendState('error')
     } else {
+      addLog('全部发送成功')
       setSendState('success')
       await new Promise<void>((resolve) => setTimeout(resolve, 1500))
       onClose()
@@ -229,6 +243,14 @@ function FileSender({ device, onClose }: Props) {
               <span>启用压缩</span>
             </label>
           </div>
+
+          {logs.length > 0 && (
+            <div className="debug-log">
+              {logs.map((line, i) => (
+                <div key={i}>{line}</div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="modal-footer">

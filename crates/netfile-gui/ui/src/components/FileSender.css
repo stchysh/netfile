@@ -241,6 +241,19 @@
   border-radius: 6px;
 }
 
+.debug-log {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background-color: #1e1e1e;
+  color: #d4d4d4;
+  font-family: monospace;
+  font-size: 0.75rem;
+  border-radius: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.6;
+}
+
 .footer-buttons {
   display: flex;
   justify-content: flex-end;

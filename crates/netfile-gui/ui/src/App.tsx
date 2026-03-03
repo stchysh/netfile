@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import DeviceList from './components/DeviceList'
 import TransferQueue from './components/TransferQueue'
@@ -33,20 +33,43 @@ function App() {
   const [transfers, setTransfers] = useState<Transfer[]>([])
   const [showSettings, setShowSettings] = useState(false)
 
+  const devicesRef = useRef<string>('')
+  const transfersRef = useRef<string>('')
+  const transfersIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const activeRef = useRef<boolean>(false)
+
   useEffect(() => {
     const fetchDevices = async () => {
       try {
         const result = await invoke<Device[]>('get_devices')
-        setDevices(result)
+        const key = JSON.stringify(result)
+        if (key !== devicesRef.current) {
+          devicesRef.current = key
+          setDevices(result)
+        }
       } catch (error) {
         console.error('Failed to fetch devices:', error)
       }
     }
 
+    const scheduleTransfers = (fast: boolean) => {
+      if (transfersIntervalRef.current) clearInterval(transfersIntervalRef.current)
+      transfersIntervalRef.current = setInterval(fetchTransfers, fast ? 500 : 2000)
+    }
+
     const fetchTransfers = async () => {
       try {
         const result = await invoke<Transfer[]>('get_transfers')
-        setTransfers(result)
+        const key = JSON.stringify(result)
+        if (key !== transfersRef.current) {
+          transfersRef.current = key
+          setTransfers(result)
+        }
+        const hasActive = result.length > 0
+        if (hasActive !== activeRef.current) {
+          activeRef.current = hasActive
+          scheduleTransfers(hasActive)
+        }
       } catch (error) {
         console.error('Failed to fetch transfers:', error)
       }
@@ -55,12 +78,12 @@ function App() {
     fetchDevices()
     fetchTransfers()
 
-    const devicesInterval = setInterval(fetchDevices, 1000)
-    const transfersInterval = setInterval(fetchTransfers, 500)
+    const devicesInterval = setInterval(fetchDevices, 2000)
+    scheduleTransfers(false)
 
     return () => {
       clearInterval(devicesInterval)
-      clearInterval(transfersInterval)
+      if (transfersIntervalRef.current) clearInterval(transfersIntervalRef.current)
     }
   }, [])
 

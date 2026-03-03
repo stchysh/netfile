@@ -119,7 +119,6 @@
 .progress-fill {
   height: 100%;
   background: linear-gradient(90deg, #3498db 0%, #2ecc71 100%);
-  transition: width 0.3s ease;
 }
 
 .transfer-stats {

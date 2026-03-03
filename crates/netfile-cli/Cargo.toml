@@ -1,0 +1,21 @@
+[package]
+name = "netfile-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "netfile"
+path = "src/main.rs"
+
+[dependencies]
+netfile-core = { path = "../netfile-core" }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+serde_json.workspace = true
+dirs = "5.0"

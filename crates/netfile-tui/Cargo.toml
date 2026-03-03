@@ -1,0 +1,22 @@
+[package]
+name = "netfile-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "netfile-tui"
+path = "src/main.rs"
+
+[dependencies]
+netfile-core = { path = "../netfile-core" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+clap.workspace = true
+dirs = "5.0"
+uuid.workspace = true

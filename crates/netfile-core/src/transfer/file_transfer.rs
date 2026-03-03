@@ -92,6 +92,7 @@ pub struct FileReceiver {
     state: TransferState,
     temp_file: Option<File>,
     data_dir: PathBuf,
+    resume_from_chunk: u32,
 }
 
 impl FileReceiver {
@@ -110,6 +111,37 @@ impl FileReceiver {
             .join("temp")
             .join(format!("{}.tmp", request.file_id));
 
+        let state_path = TransferState::state_file_path(&data_dir, &request.file_id);
+
+        if state_path.exists() && temp_file_path.exists() {
+            if let Ok(existing_state) = TransferState::load(&state_path) {
+                if !existing_state.is_complete()
+                    && existing_state.file_size == request.file_size
+                    && existing_state.chunk_size == request.chunk_size
+                {
+                    let resume_from = existing_state.next_expected_chunk();
+                    let temp_file = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&temp_file_path)
+                        .await?;
+
+                    info!(
+                        "Resuming file transfer: {} from chunk {} ({} chunks done)",
+                        request.file_name,
+                        resume_from,
+                        existing_state.completed_chunks.len()
+                    );
+
+                    return Ok(Self {
+                        state: existing_state,
+                        temp_file: Some(temp_file),
+                        data_dir,
+                        resume_from_chunk: resume_from,
+                    });
+                }
+            }
+        }
+
         if let Some(parent) = temp_file_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -126,6 +158,12 @@ impl FileReceiver {
             temp_file_path.clone(),
         );
 
+        let state_clone = state.clone();
+        let state_path_clone = state_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = state_clone.save(&state_path_clone);
+        });
+
         let temp_file = File::create(&temp_file_path).await?;
         temp_file.set_len(request.file_size).await?;
 
@@ -138,6 +176,7 @@ impl FileReceiver {
             state,
             temp_file: Some(temp_file),
             data_dir,
+            resume_from_chunk: 0,
         })
     }
 
@@ -184,6 +223,15 @@ impl FileReceiver {
 
         self.state.completed_chunks.insert(chunk_index);
 
+        if self.state.completed_chunks.len() % 32 == 0 {
+            let state_clone = self.state.clone();
+            let data_dir = self.data_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                let path = TransferState::state_file_path(&data_dir, &state_clone.file_id);
+                let _ = state_clone.save(&path);
+            });
+        }
+
         debug!(
             "Wrote chunk {} ({} bytes), progress: {:.2}%",
             chunk_index,
@@ -206,6 +254,9 @@ impl FileReceiver {
 
         let final_hash = calculate_file_hash(&self.state.temp_file_path).await?;
         if final_hash != expected_hash {
+            let _ = tokio::fs::remove_file(&self.state.temp_file_path).await;
+            let state_path = TransferState::state_file_path(&self.data_dir, &self.state.file_id);
+            let _ = tokio::fs::remove_file(&state_path).await;
             return Err(anyhow::anyhow!("File hash mismatch"));
         }
 
@@ -242,5 +293,9 @@ impl FileReceiver {
 
     pub fn file_id(&self) -> &str {
         &self.state.file_id
+    }
+
+    pub fn resume_from_chunk(&self) -> u32 {
+        self.resume_from_chunk
     }
 }

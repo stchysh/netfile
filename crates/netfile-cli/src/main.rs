@@ -239,6 +239,7 @@ async fn run_cli_mode(config: Config) -> anyhow::Result<()> {
             data_dir,
             download_dir,
             config.transfer.enable_compression,
+            config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
         )
         .await?,
     );
@@ -316,6 +317,7 @@ async fn send_file(config: Config, file_path: PathBuf, target: SocketAddr) -> an
             data_dir,
             download_dir,
             config.transfer.enable_compression,
+            config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
         )
         .await?,
     );
@@ -391,6 +393,7 @@ async fn send_directory(config: Config, dir_path: PathBuf, target: SocketAddr) -
             data_dir,
             download_dir,
             config.transfer.enable_compression,
+            config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
         )
         .await?,
     );
@@ -560,6 +563,7 @@ async fn list_transfers(config: Config, format: OutputFormat) -> anyhow::Result<
             data_dir,
             download_dir,
             config.transfer.enable_compression,
+            config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
         )
         .await?,
     );
@@ -624,6 +628,7 @@ async fn show_transfer_info(config: Config, task_id: String, format: OutputForma
             data_dir,
             download_dir,
             config.transfer.enable_compression,
+            config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
         )
         .await?,
     );

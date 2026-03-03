@@ -12,7 +12,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 pub struct TransferService {
     listener: Arc<TcpListener>,
@@ -202,6 +201,7 @@ impl TransferService {
         .await?;
 
         let file_id = receiver.file_id().to_string();
+        let resume_from_chunk = receiver.resume_from_chunk();
         let total_chunks = ((request.file_size + request.chunk_size as u64 - 1)
             / request.chunk_size as u64) as u32;
 
@@ -219,11 +219,12 @@ impl TransferService {
             file_id: file_id.clone(),
             accepted: true,
             save_path: Some(self.download_dir.to_string_lossy().to_string()),
+            resume_from_chunk: if resume_from_chunk > 0 { Some(resume_from_chunk) } else { None },
         };
 
         Self::write_msg(&mut stream, &Message::TransferResponse(response)).await?;
 
-        for _ in 0..total_chunks {
+        for _ in 0..(total_chunks - resume_from_chunk) {
             let (chunk_index, compressed, data) = match Self::read_chunk_raw(&mut stream).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -360,8 +361,6 @@ impl TransferService {
         target_addr: SocketAddr,
         enable_compression: bool,
     ) -> Result<String> {
-        let file_id = Uuid::new_v4().to_string();
-
         let metadata = tokio::fs::metadata(&file_path).await?;
         let file_size = metadata.len();
 
@@ -370,6 +369,14 @@ impl TransferService {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
+
+        let file_id = {
+            let mut h = Sha256::new();
+            h.update(file_name.as_bytes());
+            h.update(&file_size.to_le_bytes());
+            let r = h.finalize();
+            r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        };
 
         let request = TransferRequest {
             file_id: file_id.clone(),
@@ -386,12 +393,17 @@ impl TransferService {
 
         Self::write_msg(&mut stream, &Message::TransferRequest(request)).await?;
 
-        let response = Self::read_msg(&mut stream).await?;
-        if let Message::TransferResponse(resp) = response {
-            if !resp.accepted {
-                return Err(anyhow::anyhow!("Transfer rejected by receiver"));
+        let resume_from = {
+            let response = Self::read_msg(&mut stream).await?;
+            if let Message::TransferResponse(resp) = response {
+                if !resp.accepted {
+                    return Err(anyhow::anyhow!("Transfer rejected by receiver"));
+                }
+                resp.resume_from_chunk.unwrap_or(0)
+            } else {
+                0
             }
-        }
+        };
 
         let total_chunks = ((file_size + self.chunk_size as u64 - 1) / self.chunk_size as u64) as u32;
 
@@ -408,7 +420,19 @@ impl TransferService {
         let mut file = tokio::fs::File::open(&file_path).await?;
         let mut hasher = Sha256::new();
 
-        for chunk_index in 0..total_chunks {
+        if resume_from > 0 {
+            let skip_bytes = resume_from as u64 * self.chunk_size as u64;
+            let mut remaining_skip = skip_bytes;
+            let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
+            while remaining_skip > 0 {
+                let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
+                file.read_exact(&mut skip_buf[..read_size]).await?;
+                hasher.update(&skip_buf[..read_size]);
+                remaining_skip -= read_size as u64;
+            }
+        }
+
+        for chunk_index in resume_from..total_chunks {
             if self.cancelled.read().await.contains(&file_id) {
                 self.progress_tracker.remove_progress(&file_id).await;
                 self.cancelled.write().await.remove(&file_id);

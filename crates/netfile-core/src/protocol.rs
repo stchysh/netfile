@@ -29,6 +29,7 @@ pub struct TransferResponse {
     pub file_id: String,
     pub accepted: bool,
     pub save_path: Option<String>,
+    pub resume_from_chunk: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

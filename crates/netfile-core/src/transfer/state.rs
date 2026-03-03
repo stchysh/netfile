@@ -37,6 +37,10 @@ impl TransferState {
         self.completed_chunks.len() == self.total_chunks as usize
     }
 
+    pub fn next_expected_chunk(&self) -> u32 {
+        self.completed_chunks.len() as u32
+    }
+
     pub fn progress(&self) -> f64 {
         self.completed_chunks.len() as f64 / self.total_chunks as f64
     }

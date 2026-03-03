@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
             data_dir,
             download_dir,
             config.transfer.enable_compression,
+            config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
         )
         .await?,
     );

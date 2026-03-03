@@ -121,6 +121,20 @@ pub fn run() {
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {
+                {
+                    use std::io::Write;
+                    let log_path = dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join("netfile_debug.log");
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        let _ = writeln!(f, "=== App started ===");
+                    }
+                }
+
                 let config_path = Config::default_path();
                 let config = if config_path.exists() {
                     Config::load(&config_path).unwrap_or_default()

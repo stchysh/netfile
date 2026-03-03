@@ -2,7 +2,7 @@ use super::file_transfer::FileReceiver;
 use super::file_utils::{calculate_chunk_checksum, calculate_file_hash};
 use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
-use crate::protocol::{ChunkAck, ChunkData, Message, TransferRequest, TransferResponse};
+use crate::protocol::{ChunkData, Message, TransferComplete, TransferError, TransferRequest, TransferResponse};
 use anyhow::Result;
 use bytes::Bytes;
 use std::collections::HashSet;
@@ -225,19 +225,35 @@ impl TransferService {
                     }
 
                     let chunk_size = chunk.data.len() as u64;
-                    receiver.write_chunk(chunk).await?;
-
-                    let ack = Message::ChunkAck(ChunkAck {
-                        file_id: file_id.clone(),
-                        chunk_index,
-                    });
-                    Self::write_msg(&mut stream, &ack).await?;
+                    match receiver.write_chunk(chunk).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
+                                file_id: file_id.clone(),
+                                error: e.to_string(),
+                            })).await;
+                            return Err(e);
+                        }
+                    }
 
                     self.progress_tracker.update_progress(&file_id, chunk_size).await;
 
                     if receiver.is_complete() {
-                        receiver.finalize().await?;
-                        info!("Transfer completed for file: {}", file_id);
+                        match receiver.finalize().await {
+                            Ok(()) => {
+                                info!("Transfer completed for file: {}", file_id);
+                                Self::write_msg(&mut stream, &Message::TransferComplete(TransferComplete {
+                                    file_id: file_id.clone(),
+                                })).await?;
+                            }
+                            Err(e) => {
+                                let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
+                                    file_id: file_id.clone(),
+                                    error: e.to_string(),
+                                })).await;
+                                return Err(e);
+                            }
+                        }
                         break;
                     }
                 }
@@ -403,7 +419,6 @@ impl TransferService {
             let chunk_bytes_len = chunk.data.len() as u64;
 
             Self::write_msg(&mut stream, &Message::ChunkData(chunk)).await?;
-            let _ = Self::read_msg(&mut stream).await?;
 
             self.progress_tracker
                 .update_progress(&file_id, chunk_bytes_len)
@@ -415,6 +430,15 @@ impl TransferService {
                 let delay_micros = (chunk_bytes_len * 1_000_000) / self.speed_limit_bytes_per_sec;
                 tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
             }
+        }
+
+        match Self::read_msg(&mut stream).await? {
+            Message::TransferComplete(_) => {}
+            Message::TransferError(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(anyhow::anyhow!("Receiver error: {}", e.error));
+            }
+            _ => {}
         }
 
         self.progress_tracker.remove_progress(&file_id).await;

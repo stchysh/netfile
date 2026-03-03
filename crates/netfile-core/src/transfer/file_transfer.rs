@@ -159,7 +159,6 @@ impl FileReceiver {
             use tokio::io::{AsyncSeekExt, AsyncWriteExt};
             file.seek(std::io::SeekFrom::Start(offset)).await?;
             file.write_all(chunk.data.as_ref()).await?;
-            file.flush().await?;
         }
 
         self.state.completed_chunks.insert(chunk.chunk_index);
@@ -171,9 +170,6 @@ impl FileReceiver {
             self.state.progress() * 100.0
         );
 
-        let state_path = TransferState::state_file_path(&self.data_dir, &self.state.file_id);
-        self.state.save(&state_path)?;
-
         Ok(())
     }
 
@@ -182,7 +178,8 @@ impl FileReceiver {
             return Err(anyhow::anyhow!("Transfer not complete"));
         }
 
-        if let Some(file) = self.temp_file.take() {
+        if let Some(mut file) = self.temp_file.take() {
+            file.flush().await?;
             drop(file);
         }
 

@@ -170,6 +170,30 @@ impl FileReceiver {
         Ok(())
     }
 
+    pub async fn write_chunk_raw(&mut self, chunk_index: u32, data: &[u8]) -> Result<()> {
+        if chunk_index >= self.state.total_chunks {
+            return Err(anyhow::anyhow!("Invalid chunk index"));
+        }
+
+        let offset = chunk_index as u64 * self.state.chunk_size as u64;
+        if let Some(file) = &mut self.temp_file {
+            use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+            file.seek(std::io::SeekFrom::Start(offset)).await?;
+            file.write_all(data).await?;
+        }
+
+        self.state.completed_chunks.insert(chunk_index);
+
+        debug!(
+            "Wrote chunk {} ({} bytes), progress: {:.2}%",
+            chunk_index,
+            data.len(),
+            self.state.progress() * 100.0
+        );
+
+        Ok(())
+    }
+
     pub async fn finalize(&mut self, expected_hash: [u8; 32]) -> Result<()> {
         if !self.state.is_complete() {
             return Err(anyhow::anyhow!("Transfer not complete"));

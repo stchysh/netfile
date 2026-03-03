@@ -1,11 +1,9 @@
 use super::file_transfer::FileReceiver;
-use super::file_utils::calculate_chunk_checksum;
 use sha2::{Digest, Sha256};
 use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
-use crate::protocol::{ChunkData, Message, TransferComplete, TransferError, TransferRequest, TransferResponse};
+use crate::protocol::{Message, TransferComplete, TransferError, TransferRequest, TransferResponse};
 use anyhow::Result;
-use bytes::Bytes;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -139,6 +137,35 @@ impl TransferService {
         Ok(())
     }
 
+    async fn write_chunk_raw(
+        stream: &mut TcpStream,
+        chunk_index: u32,
+        compressed: bool,
+        data: &[u8],
+    ) -> Result<()> {
+        let mut header = [0u8; 9];
+        header[0..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        header[4..8].copy_from_slice(&chunk_index.to_le_bytes());
+        header[8] = compressed as u8;
+        stream.write_all(&header).await?;
+        stream.write_all(data).await?;
+        Ok(())
+    }
+
+    async fn read_chunk_raw(stream: &mut TcpStream) -> Result<(u32, bool, Vec<u8>)> {
+        let mut header = [0u8; 9];
+        stream.read_exact(&mut header).await?;
+        let data_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+        let chunk_index = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let compressed = header[8] != 0;
+        if data_len > 128 * 1024 * 1024 {
+            return Err(anyhow::anyhow!("Chunk too large: {} bytes", data_len));
+        }
+        let mut data = vec![0u8; data_len];
+        stream.read_exact(&mut data).await?;
+        Ok((chunk_index, compressed, data))
+    }
+
     async fn handle_connection(&self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
         stream.set_nodelay(true)?;
         info!("New connection from {}", addr);
@@ -196,72 +223,80 @@ impl TransferService {
 
         Self::write_msg(&mut stream, &Message::TransferResponse(response)).await?;
 
-        loop {
-            let message = match Self::read_msg(&mut stream).await {
-                Ok(m) => m,
-                Err(_) => break,
+        for _ in 0..total_chunks {
+            let (chunk_index, compressed, data) = match Self::read_chunk_raw(&mut stream).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e);
+                }
             };
 
-            match message {
-                Message::ChunkData(mut chunk) => {
-                    let chunk_index = chunk.chunk_index;
-
-                    if chunk.compressed {
-                        match crate::compression::Compressor::decompress(chunk.data.as_ref()) {
-                            Ok(decompressed) => {
-                                debug!(
-                                    "Decompressed chunk {} from {} to {} bytes",
-                                    chunk_index,
-                                    chunk.data.len(),
-                                    decompressed.len()
-                                );
-                                chunk.data = Bytes::from(decompressed);
-                                chunk.compressed = false;
-                            }
-                            Err(e) => {
-                                warn!("Failed to decompress chunk {}: {}", chunk_index, e);
-                                break;
-                            }
-                        }
+            let write_data: Vec<u8> = if compressed {
+                match crate::compression::Compressor::decompress(&data) {
+                    Ok(d) => {
+                        debug!(
+                            "Decompressed chunk {} from {} to {} bytes",
+                            chunk_index,
+                            data.len(),
+                            d.len()
+                        );
+                        d
                     }
-
-                    let chunk_size = chunk.data.len() as u64;
-                    match receiver.write_chunk(chunk).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
-                                file_id: file_id.clone(),
-                                error: e.to_string(),
-                            })).await;
-                            return Err(e);
-                        }
+                    Err(e) => {
+                        let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
+                            file_id: file_id.clone(),
+                            error: e.to_string(),
+                        })).await;
+                        self.progress_tracker.remove_progress(&file_id).await;
+                        return Err(e.into());
                     }
+                }
+            } else {
+                data
+            };
 
-                    self.progress_tracker.update_progress(&file_id, chunk_size).await;
-                }
-                Message::TransferComplete(tc) => {
-                    match receiver.finalize(tc.file_hash).await {
-                        Ok(()) => {
-                            info!("Transfer completed for file: {}", file_id);
-                            Self::write_msg(&mut stream, &Message::TransferComplete(TransferComplete {
-                                file_id: file_id.clone(),
-                                file_hash: tc.file_hash,
-                            })).await?;
-                        }
-                        Err(e) => {
-                            let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
-                                file_id: file_id.clone(),
-                                error: e.to_string(),
-                            })).await;
-                            return Err(e);
-                        }
-                    }
-                    break;
-                }
-                _ => {
-                    warn!("Unexpected message during chunk transfer");
-                    break;
-                }
+            let chunk_bytes_len = write_data.len() as u64;
+            if let Err(e) = receiver.write_chunk_raw(chunk_index, &write_data).await {
+                let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
+                    file_id: file_id.clone(),
+                    error: e.to_string(),
+                })).await;
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
+            }
+
+            self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
+        }
+
+        let tc = match Self::read_msg(&mut stream).await {
+            Ok(Message::TransferComplete(tc)) => tc,
+            Ok(_) => {
+                warn!("Expected TransferComplete but got unexpected message");
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Ok(());
+            }
+            Err(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
+            }
+        };
+
+        match receiver.finalize(tc.file_hash).await {
+            Ok(()) => {
+                info!("Transfer completed for file: {}", file_id);
+                Self::write_msg(&mut stream, &Message::TransferComplete(TransferComplete {
+                    file_id: file_id.clone(),
+                    file_hash: tc.file_hash,
+                })).await?;
+            }
+            Err(e) => {
+                let _ = Self::write_msg(&mut stream, &Message::TransferError(TransferError {
+                    file_id: file_id.clone(),
+                    error: e.to_string(),
+                })).await;
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
             }
         }
 
@@ -388,37 +423,31 @@ impl TransferService {
             file.read_exact(&mut buffer).await?;
 
             hasher.update(&buffer);
-            let checksum = calculate_chunk_checksum(&buffer);
-            let mut chunk = ChunkData {
-                file_id: file_id.clone(),
-                chunk_index,
-                data: Bytes::from(buffer),
-                checksum,
-                compressed: false,
-            };
 
-            if enable_compression && chunk.data.len() > 1024 {
-                match crate::compression::Compressor::compress(chunk.data.as_ref()) {
-                    Ok(compressed) if compressed.len() < chunk.data.len() => {
+            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+                match crate::compression::Compressor::compress(&buffer) {
+                    Ok(c) if c.len() < buffer.len() => {
                         debug!(
                             "Compressed chunk {} from {} to {} bytes ({:.1}%)",
                             chunk_index,
-                            chunk.data.len(),
-                            compressed.len(),
-                            (compressed.len() as f64 / chunk.data.len() as f64) * 100.0
+                            buffer.len(),
+                            c.len(),
+                            (c.len() as f64 / buffer.len() as f64) * 100.0
                         );
-                        chunk.data = Bytes::from(compressed);
-                        chunk.compressed = true;
+                        (c, true)
                     }
                     _ => {
                         debug!("Chunk {} not compressed (no benefit)", chunk_index);
+                        (buffer, false)
                     }
                 }
-            }
+            } else {
+                (buffer, false)
+            };
 
-            let chunk_bytes_len = chunk.data.len() as u64;
+            let chunk_bytes_len = send_data.len() as u64;
 
-            Self::write_msg(&mut stream, &Message::ChunkData(chunk)).await?;
+            Self::write_chunk_raw(&mut stream, chunk_index, compressed, &send_data).await?;
 
             self.progress_tracker
                 .update_progress(&file_id, chunk_bytes_len)

@@ -250,3 +250,12 @@
 .queue-action-button:hover {
   background-color: #b2bec3;
 }
+
+.queue-action-confirm {
+  background-color: #27ae60;
+  color: white;
+}
+
+.queue-action-confirm:hover {
+  background-color: #219a52;
+}

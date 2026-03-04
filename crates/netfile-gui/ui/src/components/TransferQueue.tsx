@@ -52,8 +52,20 @@ function TransferQueue({ transfers }: Props) {
     return Math.round((transferred / total) * 100)
   }
 
+  const hasPendingConfirm = transfers.some(t => t.status === 'pending_confirm')
   const hasActiveSend = transfers.some(t => t.direction === 'send' && t.status === 'active' && !t.paused)
   const hasPaused = transfers.some(t => t.paused)
+
+  const handleConfirmAll = async () => {
+    const pending = transfers.filter(t => t.status === 'pending_confirm')
+    for (const t of pending) {
+      try {
+        await invoke('confirm_transfer', { fileId: t.file_id })
+      } catch (error) {
+        console.error('Failed to confirm transfer:', error)
+      }
+    }
+  }
 
   const handlePauseAll = async () => {
     try {
@@ -116,6 +128,11 @@ function TransferQueue({ transfers }: Props) {
       <div className="transfer-queue-header">
         <h2>传输队列</h2>
         <div className="transfer-queue-actions">
+          {hasPendingConfirm && (
+            <button className="queue-action-button queue-action-confirm" onClick={handleConfirmAll}>
+              全部接收
+            </button>
+          )}
           {hasActiveSend && (
             <button className="queue-action-button" onClick={handlePauseAll}>
               全部暂停
@@ -135,7 +152,12 @@ function TransferQueue({ transfers }: Props) {
             <p className="hint">选择设备并发送文件开始传输</p>
           </div>
         ) : (
-          transfers.map((transfer) => {
+          (() => {
+            const pendingConfirm = transfers.filter(t => t.status === 'pending_confirm')
+            const active = transfers.filter(t => t.status !== 'pending_confirm' && t.status !== 'queued')
+            const queued = hasPendingConfirm ? [] : transfers.filter(t => t.status === 'queued')
+            const sorted = [...pendingConfirm, ...active, ...queued]
+            return sorted.map((transfer) => {
             if (transfer.status === 'pending_confirm') {
               return (
                 <div key={transfer.file_id} className="transfer-item">
@@ -268,6 +290,7 @@ function TransferQueue({ transfers }: Props) {
               </div>
             )
           })
+          })()
         )}
       </div>
     </div>

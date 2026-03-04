@@ -219,7 +219,7 @@ impl TransferService {
                 .register_pending_confirm(progress_id.clone(), request.file_name.clone(), request.file_size)
                 .await;
             let (tx, rx) = oneshot::channel();
-            self.pending_confirmations.write().await.insert(file_id.clone(), tx);
+            self.pending_confirmations.write().await.insert(progress_id.clone(), tx);
             let accepted = tokio::time::timeout(
                 Duration::from_secs(60),
                 rx,

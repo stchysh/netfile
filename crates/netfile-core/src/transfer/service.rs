@@ -419,6 +419,16 @@ impl TransferService {
         self.do_send_file(file_path, None, target_addr, enable_compression).await
     }
 
+    pub async fn send_file_with_options(
+        &self,
+        file_path: PathBuf,
+        relative_path: Option<String>,
+        target_addr: SocketAddr,
+        enable_compression: bool,
+    ) -> Result<String> {
+        self.do_send_file(file_path, relative_path, target_addr, enable_compression).await
+    }
+
     async fn do_send_file(
         &self,
         file_path: PathBuf,

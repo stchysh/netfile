@@ -201,9 +201,6 @@ impl DiscoveryService {
     async fn send_full_broadcast(&self) -> Result<()> {
         let data = self.local_message.read().await.to_bytes()?;
         for port in BROADCAST_PORT_START..=BROADCAST_PORT_END {
-            if port == self.local_port {
-                continue;
-            }
             let addr_str = format!("255.255.255.255:{}", port);
             let _ = self.socket.send_to(&data, &addr_str).await;
         }

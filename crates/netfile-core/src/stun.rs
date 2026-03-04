@@ -12,11 +12,10 @@ impl StunClient {
     pub fn new() -> Self {
         Self {
             stun_servers: vec![
+                "stun.cloudflare.com:3478".to_string(),
                 "stun.l.google.com:19302".to_string(),
                 "stun1.l.google.com:19302".to_string(),
                 "stun2.l.google.com:19302".to_string(),
-                "stun3.l.google.com:19302".to_string(),
-                "stun4.l.google.com:19302".to_string(),
             ],
         }
     }
@@ -29,7 +28,8 @@ impl StunClient {
 
     pub async fn get_public_address(&self) -> Result<SocketAddr> {
         for server in &self.stun_servers {
-            match self.query_stun_server(server).await {
+            let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+            match Self::query_with_socket(&socket, server).await {
                 Ok(addr) => {
                     info!("Got public address from {}: {}", server, addr);
                     return Ok(addr);
@@ -40,16 +40,28 @@ impl StunClient {
                 }
             }
         }
-
         Err(anyhow::anyhow!("Failed to get public address from all STUN servers"))
     }
 
-    async fn query_stun_server(&self, server: &str) -> Result<SocketAddr> {
-        debug!("Querying STUN server: {}", server);
+    pub async fn get_public_addr_for_port(&self, local_port: u16) -> Result<SocketAddr> {
+        let socket = tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", local_port)).await?;
+        for server in &self.stun_servers {
+            match Self::query_with_socket(&socket, server).await {
+                Ok(addr) => {
+                    info!("Got public address for port {} from {}: {}", local_port, server, addr);
+                    return Ok(addr);
+                }
+                Err(e) => {
+                    warn!("Failed to query STUN server {} for port {}: {}", server, local_port, e);
+                    continue;
+                }
+            }
+        }
+        Err(anyhow::anyhow!("Failed to get public address from all STUN servers"))
+    }
 
-        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-        let local_addr = socket.local_addr()?;
-        debug!("Local address: {}", local_addr);
+    async fn query_with_socket(socket: &tokio::net::UdpSocket, server: &str) -> Result<SocketAddr> {
+        debug!("Querying STUN server: {}", server);
 
         let server_addr: SocketAddr = tokio::net::lookup_host(server)
             .await?
@@ -59,12 +71,10 @@ impl StunClient {
         let mut msg = Message::new();
         msg.build(&[Box::new(BINDING_REQUEST)])?;
 
-        let msg_bytes = &msg.raw;
-        socket.send_to(msg_bytes, server_addr).await?;
+        socket.send_to(&msg.raw, server_addr).await?;
 
         let mut buf = vec![0u8; 1500];
         let timeout = tokio::time::Duration::from_secs(3);
-
         let (len, _) = tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await??;
 
         let mut response = Message::new();

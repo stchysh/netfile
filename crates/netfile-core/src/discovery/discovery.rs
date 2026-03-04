@@ -1,4 +1,5 @@
 use super::protocol::DiscoveryMessage;
+use crate::stun::StunClient;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -16,6 +17,9 @@ const HEARTBEAT_TIMEOUT: u64 = 15;
 const MIN_RECV_INTERVAL: Duration = Duration::from_millis(500);
 const MIN_BROADCAST_INTERVAL: Duration = Duration::from_secs(3);
 
+const PUNCH_REQUEST: u8 = 0x10;
+const PUNCH_ACK: u8 = 0x11;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Device {
     pub device_id: String,
@@ -28,6 +32,8 @@ pub struct Device {
     #[serde(skip)]
     pub last_seen: SystemTime,
     pub is_self: bool,
+    pub public_transfer_addr: Option<String>,
+    pub discovery_port: u16,
 }
 
 pub struct DiscoveryService {
@@ -39,6 +45,7 @@ pub struct DiscoveryService {
     last_broadcast_at: Arc<RwLock<Option<Instant>>>,
     broadcast_notify: Arc<Notify>,
     local_port: u16,
+    public_transfer_addr: Arc<RwLock<Option<String>>>,
 }
 
 impl DiscoveryService {
@@ -68,6 +75,28 @@ impl DiscoveryService {
             transfer_port,
         );
 
+        let public_transfer_addr: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+
+        {
+            let addr_ref = public_transfer_addr.clone();
+            let msg_ref = Arc::new(RwLock::new(local_message.clone()));
+            let tp = transfer_port;
+            tokio::spawn(async move {
+                let client = StunClient::new();
+                match client.get_public_addr_for_port(tp).await {
+                    Ok(addr) => {
+                        let addr_str = addr.to_string();
+                        info!("STUN discovered public transfer address: {}", addr_str);
+                        *addr_ref.write().await = Some(addr_str.clone());
+                        msg_ref.write().await.public_transfer_addr = Some(addr_str);
+                    }
+                    Err(e) => {
+                        warn!("STUN query failed: {}", e);
+                    }
+                }
+            });
+        }
+
         Ok(Self {
             socket: Arc::new(socket),
             devices: Arc::new(RwLock::new(HashMap::new())),
@@ -77,6 +106,7 @@ impl DiscoveryService {
             last_broadcast_at: Arc::new(RwLock::new(None)),
             broadcast_notify: Arc::new(Notify::new()),
             local_port: port,
+            public_transfer_addr,
         })
     }
 
@@ -123,7 +153,6 @@ impl DiscoveryService {
                 _ = self.broadcast_notify.notified() => {}
             }
 
-            // 强制最小发送间隔
             {
                 let last = self.last_broadcast_at.read().await;
                 if let Some(last_at) = *last {
@@ -137,6 +166,12 @@ impl DiscoveryService {
             }
 
             *self.last_broadcast_at.write().await = Some(Instant::now());
+
+            {
+                let mut msg = self.local_message.write().await;
+                msg.public_transfer_addr = self.public_transfer_addr.read().await.clone();
+            }
+
             if let Err(e) = self.broadcast().await {
                 error!("Failed to broadcast: {}", e);
             }
@@ -158,7 +193,6 @@ impl DiscoveryService {
                 continue;
             }
 
-            // 只发送到本地回环地址，避免广播到不存在的端口产生错误
             let addr_str = format!("127.0.0.1:{}", port);
             let _ = self.socket.send_to(&data, &addr_str).await;
         }
@@ -167,13 +201,34 @@ impl DiscoveryService {
     }
 
     async fn receive_loop(&self) {
-        let mut buf = vec![0u8; 1024];
+        let mut buf = vec![0u8; 4096];
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
-                    let _ = self.handle_message(&buf[..len], addr).await;
+                    let _ = self.handle_packet(&buf[..len], addr).await;
                 }
                 Err(_) => {}
+            }
+        }
+    }
+
+    async fn handle_packet(&self, data: &[u8], addr: SocketAddr) -> Result<()> {
+        match data.first() {
+            Some(&PUNCH_REQUEST) => {
+                debug!("Received PUNCH_REQUEST from {}", addr);
+                let mut ack = vec![PUNCH_ACK];
+                if let Some(ref our_addr) = *self.public_transfer_addr.read().await {
+                    ack.extend_from_slice(our_addr.as_bytes());
+                }
+                let _ = self.socket.send_to(&ack, addr).await;
+                Ok(())
+            }
+            Some(&PUNCH_ACK) => {
+                debug!("Received PUNCH_ACK from {}", addr);
+                Ok(())
+            }
+            _ => {
+                self.handle_message(data, addr).await
             }
         }
     }
@@ -205,6 +260,8 @@ impl DiscoveryService {
             version: message.version.clone(),
             last_seen: SystemTime::now(),
             is_self: false,
+            public_transfer_addr: message.public_transfer_addr.clone(),
+            discovery_port: addr.port(),
         };
 
         let mut devices = self.devices.write().await;
@@ -261,6 +318,8 @@ impl DiscoveryService {
             version: msg.version.clone(),
             last_seen: SystemTime::now(),
             is_self: true,
+            public_transfer_addr: self.public_transfer_addr.read().await.clone(),
+            discovery_port: self.local_port,
         };
         drop(msg);
         devices.push(local_device);
@@ -287,5 +346,19 @@ impl DiscoveryService {
 
     pub fn local_port(&self) -> Result<u16> {
         Ok(self.local_port)
+    }
+
+    pub async fn get_my_public_transfer_addr(&self) -> Option<String> {
+        self.public_transfer_addr.read().await.clone()
+    }
+
+    pub async fn send_punch(&self, target_addr: SocketAddr) -> Result<()> {
+        let mut msg = vec![PUNCH_REQUEST];
+        if let Some(ref our_addr) = *self.public_transfer_addr.read().await {
+            msg.extend_from_slice(our_addr.as_bytes());
+        }
+        self.socket.send_to(&msg, target_addr).await?;
+        debug!("Sent PUNCH_REQUEST to {}", target_addr);
+        Ok(())
     }
 }

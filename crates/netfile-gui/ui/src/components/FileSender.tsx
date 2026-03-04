@@ -11,6 +11,8 @@ interface Device {
   instance_name: string
   ip: string
   port: number
+  public_transfer_addr?: string
+  discovery_port?: number
 }
 
 interface Props {
@@ -108,11 +110,15 @@ function FileSender({ device, onClose, embedded }: Props) {
     }
 
     const targetAddr = `${device.ip}:${device.port}`
+    const publicAddr = device.public_transfer_addr
+    const peerDiscoveryAddr = device.discovery_port ? `${device.ip}:${device.discovery_port}` : undefined
     for (const file of selectedFiles) {
       invoke('send_file', {
         targetAddr,
         filePath: file.path,
         enableCompression,
+        publicAddr,
+        peerDiscoveryAddr,
       })
     }
     onClose()

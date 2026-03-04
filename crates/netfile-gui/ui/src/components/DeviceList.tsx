@@ -11,6 +11,8 @@ interface Device {
   port: number
   version: string
   is_self: boolean
+  public_transfer_addr?: string
+  discovery_port?: number
 }
 
 interface Props {
@@ -19,6 +21,8 @@ interface Props {
 
 function DeviceList({ devices }: Props) {
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null)
+  const [showManualInput, setShowManualInput] = useState(false)
+  const [manualAddr, setManualAddr] = useState('')
 
   const handleSendFile = (device: Device) => {
     setSelectedDevice(device)
@@ -26,6 +30,29 @@ function DeviceList({ devices }: Props) {
 
   const handleCloseSender = () => {
     setSelectedDevice(null)
+  }
+
+  const handleManualConnect = () => {
+    const trimmed = manualAddr.trim()
+    if (!trimmed) return
+    const lastColon = trimmed.lastIndexOf(':')
+    if (lastColon === -1) return
+    const ip = trimmed.slice(0, lastColon)
+    const port = parseInt(trimmed.slice(lastColon + 1))
+    if (!ip || isNaN(port)) return
+    const device: Device = {
+      device_id: '',
+      instance_id: `manual-${trimmed}`,
+      device_name: trimmed,
+      instance_name: '手动连接',
+      ip,
+      port,
+      version: '',
+      is_self: false,
+    }
+    setSelectedDevice(device)
+    setShowManualInput(false)
+    setManualAddr('')
   }
 
   return (
@@ -56,6 +83,27 @@ function DeviceList({ devices }: Props) {
                 </div>
               </div>
             ))
+          )}
+        </div>
+        <div className="device-list-footer">
+          {showManualInput ? (
+            <div className="manual-connect-row">
+              <input
+                className="manual-connect-input"
+                type="text"
+                placeholder="IP:端口"
+                value={manualAddr}
+                onChange={(e) => setManualAddr(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleManualConnect() }}
+                autoFocus
+              />
+              <button className="manual-connect-confirm" onClick={handleManualConnect}>连接</button>
+              <button className="manual-connect-cancel" onClick={() => { setShowManualInput(false); setManualAddr('') }}>取消</button>
+            </div>
+          ) : (
+            <button className="manual-connect-button" onClick={() => setShowManualInput(true)}>
+              + 手动连接
+            </button>
           )}
         </div>
       </div>

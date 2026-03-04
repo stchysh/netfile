@@ -507,6 +507,46 @@ impl TransferService {
         Ok(())
     }
 
+    pub async fn send_file_with_fallback(
+        &self,
+        file_path: PathBuf,
+        primary_addr: SocketAddr,
+        fallback_addr: Option<SocketAddr>,
+        enable_compression: bool,
+    ) -> Result<String> {
+        match self.do_send_file(file_path.clone(), None, primary_addr, enable_compression).await {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                if let Some(fallback) = fallback_addr {
+                    warn!("Primary addr {} failed ({}), trying fallback {}", primary_addr, e, fallback);
+                    self.do_send_file(file_path, None, fallback, enable_compression).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    pub async fn send_folder_with_fallback(
+        &self,
+        folder_path: PathBuf,
+        primary_addr: SocketAddr,
+        fallback_addr: Option<SocketAddr>,
+        enable_compression: bool,
+    ) -> Result<()> {
+        match self.send_folder(folder_path.clone(), primary_addr, enable_compression).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Some(fallback) = fallback_addr {
+                    warn!("Primary addr {} failed for folder ({}), trying fallback {}", primary_addr, e, fallback);
+                    self.send_folder(folder_path, fallback, enable_compression).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     async fn send_file_for_folder(
         &self,
         folder_id: &str,

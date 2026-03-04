@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import './Settings.css'
@@ -44,8 +44,9 @@ function Settings({ onClose }: Props) {
   const [config, setConfig] = useState<Config | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [myPublicAddr, setMyPublicAddr] = useState<string>('')
 
-  useState(() => {
+  useEffect(() => {
     const loadConfig = async () => {
       try {
         const result = await invoke<Config>('get_config')
@@ -57,7 +58,10 @@ function Settings({ onClose }: Props) {
       }
     }
     loadConfig()
-  })
+    invoke<string | null>('get_my_public_addr').then((addr) => {
+      setMyPublicAddr(addr ?? '')
+    }).catch(() => {})
+  }, [])
 
   const handleSave = async () => {
     if (!config) return
@@ -198,6 +202,10 @@ function Settings({ onClose }: Props) {
                   })
                 }
               />
+            </div>
+            <div className="form-group">
+              <label>我的公网传输地址</label>
+              <input type="text" value={myPublicAddr || '获取中...'} disabled />
             </div>
           </div>
 

@@ -12,6 +12,8 @@ interface Device {
   port: number
   version: string
   is_self: boolean
+  public_transfer_addr?: string
+  discovery_port?: number
 }
 
 interface Props {

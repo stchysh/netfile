@@ -104,3 +104,69 @@
   color: #7f8c8d;
 }
 
+.device-list-footer {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+.manual-connect-button {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px dashed #b2bec3;
+  border-radius: 6px;
+  background-color: transparent;
+  color: #7f8c8d;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.manual-connect-button:hover {
+  background-color: #f8f9fa;
+  color: #2c3e50;
+}
+
+.manual-connect-row {
+  display: flex;
+  gap: 0.375rem;
+}
+
+.manual-connect-input {
+  flex: 1;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  outline: none;
+}
+
+.manual-connect-input:focus {
+  border-color: #3498db;
+}
+
+.manual-connect-confirm {
+  padding: 0.375rem 0.625rem;
+  border: none;
+  border-radius: 4px;
+  background-color: #27ae60;
+  color: white;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.manual-connect-confirm:hover {
+  background-color: #219a52;
+}
+
+.manual-connect-cancel {
+  padding: 0.375rem 0.625rem;
+  border: none;
+  border-radius: 4px;
+  background-color: #dfe6e9;
+  color: #2d3436;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.manual-connect-cancel:hover {
+  background-color: #b2bec3;
+}

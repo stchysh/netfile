@@ -28,6 +28,8 @@ async fn send_file(
     target_addr: String,
     file_path: String,
     enable_compression: Option<bool>,
+    public_addr: Option<String>,
+    peer_discovery_addr: Option<String>,
 ) -> Result<(), String> {
     let addr = target_addr.parse().map_err(|e| format!("无效地址: {}", e))?;
     let path = PathBuf::from(&file_path);
@@ -35,10 +37,21 @@ async fn send_file(
         return Err(format!("文件不存在: {}", file_path));
     }
     let compression = enable_compression.unwrap_or(false);
+    let fallback_addr = public_addr.as_deref().and_then(|s| s.parse().ok());
+
+    if let Some(ref da) = peer_discovery_addr {
+        if let Ok(disc_addr) = da.parse() {
+            let ds = state.discovery_service.clone();
+            tokio::spawn(async move {
+                let _ = ds.send_punch(disc_addr).await;
+            });
+        }
+    }
+
     if path.is_dir() {
         let service = state.transfer_service.clone();
         tokio::spawn(async move {
-            if let Err(e) = service.send_folder(path, addr, compression).await {
+            if let Err(e) = service.send_folder_with_fallback(path, addr, fallback_addr, compression).await {
                 tracing::error!("Failed to send folder: {}", e);
             }
         });
@@ -46,11 +59,16 @@ async fn send_file(
     } else {
         state
             .transfer_service
-            .send_file_compressed(path, addr, compression)
+            .send_file_with_fallback(path, addr, fallback_addr, compression)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+}
+
+#[tauri::command]
+async fn get_my_public_addr(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.discovery_service.get_my_public_transfer_addr().await)
 }
 
 #[tauri::command]
@@ -214,6 +232,7 @@ pub fn run() {
             get_conversation,
             get_config,
             update_config,
+            get_my_public_addr,
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {

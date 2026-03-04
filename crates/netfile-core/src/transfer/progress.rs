@@ -14,6 +14,7 @@ pub struct TransferProgress {
     pub eta_secs: u64,
     pub elapsed_secs: u64,
     pub direction: String,
+    pub status: String,
     #[serde(skip)]
     pub start_time: Instant,
     #[serde(skip)]
@@ -34,6 +35,7 @@ impl TransferProgress {
             eta_secs: 0,
             elapsed_secs: 0,
             direction,
+            status: "active".to_string(),
             start_time: now,
             last_update: now,
         }
@@ -134,6 +136,28 @@ impl ProgressTracker {
     ) {
         let progress = TransferProgress::new(file_id.clone(), file_name, total_size, total_chunks, direction);
         self.progresses.write().await.insert(file_id, progress);
+    }
+
+    pub async fn register_queued(
+        &self,
+        file_id: String,
+        file_name: String,
+        total_size: u64,
+        total_chunks: u32,
+        direction: String,
+    ) {
+        let mut progress = TransferProgress::new(file_id.clone(), file_name, total_size, total_chunks, direction);
+        progress.status = "queued".to_string();
+        self.progresses.write().await.insert(file_id, progress);
+    }
+
+    pub async fn set_active(&self, file_id: &str) {
+        if let Some(progress) = self.progresses.write().await.get_mut(file_id) {
+            progress.status = "active".to_string();
+            let now = Instant::now();
+            progress.start_time = now;
+            progress.last_update = now;
+        }
     }
 
     pub async fn update_progress(&self, file_id: &str, chunk_size: u64) {

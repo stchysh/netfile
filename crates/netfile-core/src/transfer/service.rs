@@ -385,6 +385,18 @@ impl TransferService {
             r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
         };
 
+        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+
+        self.progress_tracker
+            .register_queued(
+                file_id.clone(),
+                file_name.clone(),
+                file_size,
+                total_chunks,
+                "send".to_string(),
+            )
+            .await;
+
         let request = TransferRequest {
             file_id: file_id.clone(),
             file_name: file_name.clone(),
@@ -395,15 +407,31 @@ impl TransferService {
             password_hash: None,
         };
 
-        let mut stream = TcpStream::connect(target_addr).await?;
+        let mut stream = match TcpStream::connect(target_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e.into());
+            }
+        };
         stream.set_nodelay(true)?;
 
-        Self::write_msg(&mut stream, &Message::TransferRequest(request)).await?;
+        if let Err(e) = Self::write_msg(&mut stream, &Message::TransferRequest(request)).await {
+            self.progress_tracker.remove_progress(&file_id).await;
+            return Err(e);
+        }
 
         let resume_from = {
-            let response = Self::read_msg(&mut stream).await?;
+            let response = match Self::read_msg(&mut stream).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e);
+                }
+            };
             if let Message::TransferResponse(resp) = response {
                 if !resp.accepted {
+                    self.progress_tracker.remove_progress(&file_id).await;
                     return Err(anyhow::anyhow!("Transfer rejected by receiver"));
                 }
                 resp.resume_from_chunk.unwrap_or(0)
@@ -412,17 +440,7 @@ impl TransferService {
             }
         };
 
-        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
-
-        self.progress_tracker
-            .start_transfer(
-                file_id.clone(),
-                file_name,
-                file_size,
-                total_chunks,
-                "send".to_string(),
-            )
-            .await;
+        self.progress_tracker.set_active(&file_id).await;
 
         let mut file = tokio::fs::File::open(&file_path).await?;
         let mut hasher = Sha256::new();

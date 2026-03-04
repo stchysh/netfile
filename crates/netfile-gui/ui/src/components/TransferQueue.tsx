@@ -12,6 +12,7 @@ interface Transfer {
   eta_secs: number
   elapsed_secs: number
   direction: string
+  status: string
 }
 
 interface Props {
@@ -71,6 +72,34 @@ function TransferQueue({ transfers }: Props) {
           </div>
         ) : (
           transfers.map((transfer) => {
+            if (transfer.status === 'queued') {
+              return (
+                <div key={transfer.file_id} className="transfer-item">
+                  <div className="transfer-header">
+                    <div className="transfer-name-row">
+                      <span className={`direction-badge direction-${transfer.direction}`}>
+                        {transfer.direction === 'send' ? '发送' : '接收'}
+                      </span>
+                      <div className="transfer-name">{transfer.file_name}</div>
+                    </div>
+                    <div className="transfer-header-right">
+                      <span className="transfer-queued-label">等待中</span>
+                      <button
+                        className="transfer-cancel-button"
+                        onClick={() => handleCancel(transfer.file_id)}
+                        title="取消传输"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                  <div className="transfer-stats">
+                    <span className="transfer-size">{formatSize(transfer.total_size)}</span>
+                  </div>
+                </div>
+              )
+            }
+
             const progress = calculateProgress(transfer.transferred, transfer.total_size)
             const eta = formatEta(transfer.eta_secs)
             const elapsed = formatElapsed(transfer.elapsed_secs)

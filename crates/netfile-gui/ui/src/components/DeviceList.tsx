@@ -42,30 +42,18 @@ function DeviceList({ devices }: Props) {
             </div>
           ) : (
             devices.map((device) => (
-              <div key={device.instance_id} className="device-item">
+              <div key={device.instance_id} className="device-item" onClick={() => handleSendFile(device)}>
                 <div className="device-info">
                   <div className="device-status online"></div>
                   <div className="device-details">
                     <div className="device-name">
-                      {device.device_name}
-                      {device.instance_name && (
-                        <span className="instance-name"> - {device.instance_name}</span>
-                      )}
-                      {device.is_self && (
-                        <span className="self-badge"> (本机)</span>
-                      )}
-                    </div>
-                    <div className="device-address">
-                      {device.ip}:{device.port}
+                      {device.instance_name}
+                      <span className={device.is_self ? 'self-badge' : 'instance-name'}>
+                        {' '}({device.is_self ? '本机' : device.ip})
+                      </span>
                     </div>
                   </div>
                 </div>
-                <button
-                  className="send-button"
-                  onClick={() => handleSendFile(device)}
-                >
-                  发送文件
-                </button>
               </div>
             ))
           )}

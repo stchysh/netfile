@@ -49,6 +49,7 @@
   background-color: #f8f9fa;
   border-radius: 8px;
   transition: background-color 0.2s;
+  cursor: pointer;
 }
 
 .device-item:hover {
@@ -103,27 +104,3 @@
   color: #7f8c8d;
 }
 
-.send-button {
-  padding: 0.5rem 1rem;
-  background-color: #3498db;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 0.875rem;
-  cursor: pointer;
-  transition: background-color 0.2s;
-  white-space: nowrap;
-}
-
-.send-button:hover {
-  background-color: #2980b9;
-}
-
-.send-button:active {
-  background-color: #21618c;
-}
-
-.send-button:disabled {
-  background-color: #bdc3c7;
-  cursor: not-allowed;
-}

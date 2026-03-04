@@ -147,3 +147,9 @@
   font-weight: 500;
   color: #7f8c8d;
 }
+
+.transfer-queued-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #f39c12;
+}

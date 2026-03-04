@@ -70,6 +70,18 @@ async fn resume_transfer(
 }
 
 #[tauri::command]
+async fn pause_all_transfers(state: State<'_, AppState>) -> Result<(), String> {
+    state.transfer_service.pause_all().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resume_all_transfers(state: State<'_, AppState>) -> Result<(), String> {
+    state.transfer_service.resume_all().await;
+    Ok(())
+}
+
+#[tauri::command]
 async fn confirm_transfer(
     state: State<'_, AppState>,
     file_id: String,
@@ -183,6 +195,8 @@ pub fn run() {
             cancel_transfer,
             pause_transfer,
             resume_transfer,
+            pause_all_transfers,
+            resume_all_transfers,
             confirm_transfer,
             reject_transfer,
             send_text_message,

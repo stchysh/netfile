@@ -52,6 +52,25 @@ function TransferQueue({ transfers }: Props) {
     return Math.round((transferred / total) * 100)
   }
 
+  const hasActiveSend = transfers.some(t => t.direction === 'send' && t.status === 'active' && !t.paused)
+  const hasPaused = transfers.some(t => t.paused)
+
+  const handlePauseAll = async () => {
+    try {
+      await invoke('pause_all_transfers')
+    } catch (error) {
+      console.error('Failed to pause all:', error)
+    }
+  }
+
+  const handleResumeAll = async () => {
+    try {
+      await invoke('resume_all_transfers')
+    } catch (error) {
+      console.error('Failed to resume all:', error)
+    }
+  }
+
   const handleCancel = async (fileId: string) => {
     try {
       await invoke('cancel_transfer', { fileId })
@@ -96,6 +115,18 @@ function TransferQueue({ transfers }: Props) {
     <div className="transfer-queue">
       <div className="transfer-queue-header">
         <h2>传输队列</h2>
+        <div className="transfer-queue-actions">
+          {hasActiveSend && (
+            <button className="queue-action-button" onClick={handlePauseAll}>
+              全部暂停
+            </button>
+          )}
+          {hasPaused && (
+            <button className="queue-action-button" onClick={handleResumeAll}>
+              全部继续
+            </button>
+          )}
+        </div>
       </div>
       <div className="transfer-queue-content">
         {transfers.length === 0 ? (

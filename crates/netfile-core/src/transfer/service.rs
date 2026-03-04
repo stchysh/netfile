@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -31,6 +31,7 @@ pub struct TransferService {
     enable_compression: Arc<RwLock<bool>>,
     speed_limit_bytes_per_sec: Arc<RwLock<u64>>,
     message_store: Arc<MessageStore>,
+    semaphore: Arc<RwLock<Arc<Semaphore>>>,
 }
 
 impl TransferService {
@@ -63,6 +64,7 @@ impl TransferService {
         info!("Transfer service listening on port {}", port);
 
         let message_store = Arc::new(MessageStore::new(data_dir.clone()));
+        let semaphore = Arc::new(RwLock::new(Arc::new(Semaphore::new(max_concurrent))));
 
         Ok(Self {
             listener: Arc::new(listener),
@@ -79,6 +81,7 @@ impl TransferService {
             enable_compression: Arc::new(RwLock::new(enable_compression)),
             speed_limit_bytes_per_sec: Arc::new(RwLock::new(speed_limit_bytes_per_sec)),
             message_store,
+            semaphore,
         })
     }
 
@@ -458,6 +461,17 @@ impl TransferService {
             )
             .await;
 
+        let _permit = {
+            let sem = self.semaphore.read().await.clone();
+            match sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(anyhow::anyhow!("Transfer semaphore closed"));
+                }
+            }
+        };
+
         let request = TransferRequest {
             file_id: file_id.clone(),
             file_name: file_name.clone(),
@@ -687,6 +701,25 @@ impl TransferService {
 
     pub async fn update_max_concurrent(&self, n: usize) {
         self.task_queue.update_max_concurrent(n).await;
+        *self.semaphore.write().await = Arc::new(Semaphore::new(n));
+    }
+
+    pub async fn pause_all(&self) {
+        let all = self.progress_tracker.list_all().await;
+        for p in all {
+            if p.direction == "send" && p.status == "active" && !p.paused {
+                self.pause_transfer(&p.file_id).await;
+            }
+        }
+    }
+
+    pub async fn resume_all(&self) {
+        let all = self.progress_tracker.list_all().await;
+        for p in all {
+            if p.paused {
+                self.resume_transfer(&p.file_id).await;
+            }
+        }
     }
 
     pub fn progress_tracker(&self) -> Arc<ProgressTracker> {
@@ -723,6 +756,7 @@ impl Clone for TransferService {
             enable_compression: self.enable_compression.clone(),
             speed_limit_bytes_per_sec: self.speed_limit_bytes_per_sec.clone(),
             message_store: self.message_store.clone(),
+            semaphore: self.semaphore.clone(),
         }
     }
 }

@@ -223,10 +223,7 @@ impl TransferService {
                 .await;
             let (tx, rx) = oneshot::channel();
             self.pending_confirmations.write().await.insert(progress_id.clone(), tx);
-            let accepted = tokio::time::timeout(
-                Duration::from_secs(60),
-                rx,
-            ).await.unwrap_or(Ok(false)).unwrap_or(false);
+            let accepted = rx.await.unwrap_or(false);
             self.progress_tracker.remove_progress(&progress_id).await;
             if !accepted {
                 let _ = Self::write_msg(&mut stream, &Message::TransferResponse(TransferResponse {
@@ -461,17 +458,6 @@ impl TransferService {
             )
             .await;
 
-        let _permit = {
-            let sem = self.semaphore.read().await.clone();
-            match sem.acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => {
-                    self.progress_tracker.remove_progress(&file_id).await;
-                    return Err(anyhow::anyhow!("Transfer semaphore closed"));
-                }
-            }
-        };
-
         let request = TransferRequest {
             file_id: file_id.clone(),
             file_name: file_name.clone(),
@@ -512,6 +498,17 @@ impl TransferService {
                 resp.resume_from_chunk.unwrap_or(0)
             } else {
                 0
+            }
+        };
+
+        let _permit = {
+            let sem = self.semaphore.read().await.clone();
+            match sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(anyhow::anyhow!("Transfer semaphore closed"));
+                }
             }
         };
 

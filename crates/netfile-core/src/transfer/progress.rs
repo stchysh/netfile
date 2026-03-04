@@ -196,7 +196,7 @@ impl ProgressTracker {
     pub async fn list_all(&self) -> Vec<TransferProgress> {
         let progresses = self.progresses.read().await;
         progresses.iter().filter_map(|(key, p)| {
-            if key.starts_with("recv:") && progresses.contains_key(&key["recv:".len()..]) {
+            if key.starts_with("recv:") && p.status != "pending_confirm" && progresses.contains_key(&key["recv:".len()..]) {
                 return None;
             }
             let mut p = p.clone();

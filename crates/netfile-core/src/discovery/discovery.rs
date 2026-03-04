@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::net::UdpSocket;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
@@ -14,6 +14,7 @@ const BROADCAST_PORT_START: u16 = 37020;
 const BROADCAST_PORT_END: u16 = 37040;
 const HEARTBEAT_TIMEOUT: u64 = 15;
 const MIN_RECV_INTERVAL: Duration = Duration::from_millis(500);
+const MIN_BROADCAST_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Device {
@@ -35,6 +36,8 @@ pub struct DiscoveryService {
     local_message: Arc<RwLock<DiscoveryMessage>>,
     broadcast_interval: Arc<RwLock<Duration>>,
     recv_timestamps: Arc<RwLock<HashMap<String, (u64, Instant)>>>,
+    last_broadcast_at: Arc<RwLock<Option<Instant>>>,
+    broadcast_notify: Arc<Notify>,
     local_port: u16,
 }
 
@@ -71,6 +74,8 @@ impl DiscoveryService {
             local_message: Arc::new(RwLock::new(local_message)),
             broadcast_interval: Arc::new(RwLock::new(Duration::from_secs(broadcast_interval))),
             recv_timestamps: Arc::new(RwLock::new(HashMap::new())),
+            last_broadcast_at: Arc::new(RwLock::new(None)),
+            broadcast_notify: Arc::new(Notify::new()),
             local_port: port,
         })
     }
@@ -113,7 +118,25 @@ impl DiscoveryService {
     async fn broadcast_loop(&self) {
         loop {
             let interval = *self.broadcast_interval.read().await;
-            time::sleep(interval).await;
+            tokio::select! {
+                _ = time::sleep(interval) => {}
+                _ = self.broadcast_notify.notified() => {}
+            }
+
+            // 强制最小发送间隔
+            {
+                let last = self.last_broadcast_at.read().await;
+                if let Some(last_at) = *last {
+                    let elapsed = last_at.elapsed();
+                    if elapsed < MIN_BROADCAST_INTERVAL {
+                        let wait = MIN_BROADCAST_INTERVAL - elapsed;
+                        drop(last);
+                        time::sleep(wait).await;
+                    }
+                }
+            }
+
+            *self.last_broadcast_at.write().await = Some(Instant::now());
             if let Err(e) = self.broadcast().await {
                 error!("Failed to broadcast: {}", e);
             }
@@ -121,6 +144,13 @@ impl DiscoveryService {
     }
 
     async fn broadcast(&self) -> Result<()> {
+        {
+            let mut msg = self.local_message.write().await;
+            msg.timestamp = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
         let data = self.local_message.read().await.to_bytes()?;
 
         for port in BROADCAST_PORT_START..=BROADCAST_PORT_END {
@@ -242,10 +272,13 @@ impl DiscoveryService {
         let mut msg = self.local_message.write().await;
         msg.device_name = device_name;
         msg.instance_name = instance_name;
+        drop(msg);
+        self.broadcast_notify.notify_one();
     }
 
     pub async fn update_broadcast_interval(&self, secs: u64) {
         *self.broadcast_interval.write().await = Duration::from_secs(secs);
+        self.broadcast_notify.notify_one();
     }
 
     pub async fn get_device(&self, instance_id: &str) -> Option<Device> {

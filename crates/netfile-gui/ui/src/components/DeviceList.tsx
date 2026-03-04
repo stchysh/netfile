@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import FileSender from './FileSender'
+import DeviceModal from './DeviceModal'
 import './DeviceList.css'
 
 interface Device {
@@ -61,7 +61,7 @@ function DeviceList({ devices }: Props) {
       </div>
 
       {selectedDevice && (
-        <FileSender device={selectedDevice} onClose={handleCloseSender} />
+        <DeviceModal device={selectedDevice} onClose={handleCloseSender} />
       )}
     </>
   )

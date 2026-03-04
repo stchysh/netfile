@@ -2,16 +2,19 @@ use super::file_transfer::FileReceiver;
 use sha2::{Digest, Sha256};
 use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
-use crate::protocol::{Message, TransferComplete, TransferError, TransferRequest, TransferResponse};
+use crate::protocol::{Message, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
+use crate::message_store::{ChatMessage, MessageStore};
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 pub struct TransferService {
     listener: Arc<TcpListener>,
@@ -19,11 +22,15 @@ pub struct TransferService {
     task_queue: Arc<TaskQueue>,
     progress_tracker: Arc<ProgressTracker>,
     cancelled: Arc<RwLock<HashSet<String>>>,
+    paused: Arc<RwLock<HashSet<String>>>,
+    pending_confirmations: Arc<RwLock<HashMap<String, oneshot::Sender<bool>>>>,
+    require_confirmation: Arc<RwLock<bool>>,
     data_dir: PathBuf,
     download_dir: Arc<RwLock<PathBuf>>,
     chunk_size: Arc<RwLock<u32>>,
     enable_compression: Arc<RwLock<bool>>,
     speed_limit_bytes_per_sec: Arc<RwLock<u64>>,
+    message_store: Arc<MessageStore>,
 }
 
 impl TransferService {
@@ -55,17 +62,23 @@ impl TransferService {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
         info!("Transfer service listening on port {}", port);
 
+        let message_store = Arc::new(MessageStore::new(data_dir.clone()));
+
         Ok(Self {
             listener: Arc::new(listener),
             transfer_port: port,
             task_queue: Arc::new(TaskQueue::new(max_concurrent)),
             progress_tracker: Arc::new(ProgressTracker::new()),
             cancelled: Arc::new(RwLock::new(HashSet::new())),
+            paused: Arc::new(RwLock::new(HashSet::new())),
+            pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
+            require_confirmation: Arc::new(RwLock::new(false)),
             data_dir,
             download_dir: Arc::new(RwLock::new(download_dir)),
             chunk_size: Arc::new(RwLock::new(chunk_size)),
             enable_compression: Arc::new(RwLock::new(enable_compression)),
             speed_limit_bytes_per_sec: Arc::new(RwLock::new(speed_limit_bytes_per_sec)),
+            message_store,
         })
     }
 
@@ -175,6 +188,9 @@ impl TransferService {
             Message::TransferRequest(request) => {
                 self.handle_transfer_request(stream, request).await?;
             }
+            Message::TextMessage(msg) => {
+                self.handle_text_message(stream, msg).await?;
+            }
             _ => {
                 warn!("Unexpected message type from {}", addr);
             }
@@ -193,6 +209,33 @@ impl TransferService {
             request.file_name, request.file_size
         );
 
+        let file_id = request.file_id.clone();
+        let progress_id = format!("recv:{}", file_id);
+        let total_chunks = ((request.file_size + request.chunk_size as u64 - 1)
+            / request.chunk_size as u64) as u32;
+
+        if *self.require_confirmation.read().await {
+            self.progress_tracker
+                .register_pending_confirm(progress_id.clone(), request.file_name.clone(), request.file_size)
+                .await;
+            let (tx, rx) = oneshot::channel();
+            self.pending_confirmations.write().await.insert(file_id.clone(), tx);
+            let accepted = tokio::time::timeout(
+                Duration::from_secs(60),
+                rx,
+            ).await.unwrap_or(Ok(false)).unwrap_or(false);
+            self.progress_tracker.remove_progress(&progress_id).await;
+            if !accepted {
+                let _ = Self::write_msg(&mut stream, &Message::TransferResponse(TransferResponse {
+                    file_id: file_id.clone(),
+                    accepted: false,
+                    save_path: None,
+                    resume_from_chunk: None,
+                })).await;
+                return Ok(());
+            }
+        }
+
         let download_dir = self.download_dir.read().await.clone();
         let mut receiver = FileReceiver::new(
             request.clone(),
@@ -201,11 +244,7 @@ impl TransferService {
         )
         .await?;
 
-        let file_id = receiver.file_id().to_string();
-        let progress_id = format!("recv:{}", file_id);
         let resume_from_chunk = receiver.resume_from_chunk();
-        let total_chunks = ((request.file_size + request.chunk_size as u64 - 1)
-            / request.chunk_size as u64) as u32;
 
         self.progress_tracker
             .start_transfer(
@@ -230,6 +269,7 @@ impl TransferService {
             let (chunk_index, compressed, data) = match Self::read_chunk_raw(&mut stream).await {
                 Ok(r) => r,
                 Err(e) => {
+                    receiver.cleanup().await;
                     self.progress_tracker.remove_progress(&progress_id).await;
                     return Err(e);
                 }
@@ -251,6 +291,7 @@ impl TransferService {
                             file_id: file_id.clone(),
                             error: e.to_string(),
                         })).await;
+                        receiver.cleanup().await;
                         self.progress_tracker.remove_progress(&progress_id).await;
                         return Err(e.into());
                     }
@@ -265,6 +306,7 @@ impl TransferService {
                     file_id: file_id.clone(),
                     error: e.to_string(),
                 })).await;
+                receiver.cleanup().await;
                 self.progress_tracker.remove_progress(&progress_id).await;
                 return Err(e);
             }
@@ -276,10 +318,12 @@ impl TransferService {
             Ok(Message::TransferComplete(tc)) => tc,
             Ok(_) => {
                 warn!("Expected TransferComplete but got unexpected message");
+                receiver.cleanup().await;
                 self.progress_tracker.remove_progress(&progress_id).await;
                 return Ok(());
             }
             Err(e) => {
+                receiver.cleanup().await;
                 self.progress_tracker.remove_progress(&progress_id).await;
                 return Err(e);
             }
@@ -298,6 +342,7 @@ impl TransferService {
                     file_id: file_id.clone(),
                     error: e.to_string(),
                 })).await;
+                receiver.cleanup().await;
                 self.progress_tracker.remove_progress(&progress_id).await;
                 return Err(e);
             }
@@ -305,6 +350,22 @@ impl TransferService {
 
         self.progress_tracker.remove_progress(&progress_id).await;
 
+        Ok(())
+    }
+
+    async fn handle_text_message(&self, mut stream: TcpStream, msg: TextMessage) -> Result<()> {
+        let chat_msg = ChatMessage {
+            id: msg.id.clone(),
+            from_instance_id: msg.from_instance_id.clone(),
+            from_instance_name: msg.from_instance_name.clone(),
+            content: msg.content.clone(),
+            timestamp: msg.timestamp,
+            is_self: false,
+        };
+        self.message_store.save_message(&msg.from_instance_id, chat_msg).await?;
+        Self::write_msg(&mut stream, &Message::TextAck(TextAck {
+            message_id: msg.id,
+        })).await?;
         Ok(())
     }
 
@@ -465,6 +526,11 @@ impl TransferService {
                 return Ok(file_id);
             }
 
+            loop {
+                if !self.paused.read().await.contains(&file_id) { break; }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
             let offset = chunk_index as u64 * chunk_size as u64;
             let remaining = file_size - offset;
             let read_size = (chunk_size as u64).min(remaining) as usize;
@@ -538,17 +604,85 @@ impl TransferService {
         self.cancelled.write().await.insert(file_id.to_string());
     }
 
+    pub async fn pause_transfer(&self, file_id: &str) {
+        self.paused.write().await.insert(file_id.to_string());
+        self.progress_tracker.set_paused(file_id, true).await;
+    }
+
+    pub async fn resume_transfer(&self, file_id: &str) {
+        self.paused.write().await.remove(file_id);
+        self.progress_tracker.set_paused(file_id, false).await;
+    }
+
+    pub async fn confirm_transfer(&self, file_id: &str) {
+        if let Some(tx) = self.pending_confirmations.write().await.remove(file_id) {
+            let _ = tx.send(true);
+        }
+    }
+
+    pub async fn reject_transfer(&self, file_id: &str) {
+        if let Some(tx) = self.pending_confirmations.write().await.remove(file_id) {
+            let _ = tx.send(false);
+        }
+    }
+
+    pub async fn send_text_message(
+        &self,
+        peer_instance_id: &str,
+        target_addr: SocketAddr,
+        content: String,
+        from_instance_id: String,
+        from_instance_name: String,
+    ) -> Result<()> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let id = Uuid::new_v4().to_string();
+
+        let chat_msg = ChatMessage {
+            id: id.clone(),
+            from_instance_id: from_instance_id.clone(),
+            from_instance_name: from_instance_name.clone(),
+            content: content.clone(),
+            timestamp,
+            is_self: true,
+        };
+        self.message_store.save_message(peer_instance_id, chat_msg).await?;
+
+        let msg = TextMessage {
+            id,
+            from_instance_id,
+            from_instance_name,
+            content,
+            timestamp,
+        };
+
+        let mut stream = TcpStream::connect(target_addr).await?;
+        stream.set_nodelay(true)?;
+        Self::write_msg(&mut stream, &Message::TextMessage(msg)).await?;
+
+        match Self::read_msg(&mut stream).await? {
+            Message::TextAck(_) => {}
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     pub async fn update_transfer_config(
         &self,
         download_dir: PathBuf,
         chunk_size: u32,
         enable_compression: bool,
         speed_limit_bytes_per_sec: u64,
+        require_confirmation: bool,
     ) {
         *self.download_dir.write().await = download_dir;
         *self.chunk_size.write().await = chunk_size;
         *self.enable_compression.write().await = enable_compression;
         *self.speed_limit_bytes_per_sec.write().await = speed_limit_bytes_per_sec;
+        *self.require_confirmation.write().await = require_confirmation;
     }
 
     pub async fn update_max_concurrent(&self, n: usize) {
@@ -566,6 +700,10 @@ impl TransferService {
     pub fn task_queue(&self) -> Arc<TaskQueue> {
         self.task_queue.clone()
     }
+
+    pub fn message_store(&self) -> Arc<MessageStore> {
+        self.message_store.clone()
+    }
 }
 
 impl Clone for TransferService {
@@ -576,11 +714,15 @@ impl Clone for TransferService {
             task_queue: self.task_queue.clone(),
             progress_tracker: self.progress_tracker.clone(),
             cancelled: self.cancelled.clone(),
+            paused: self.paused.clone(),
+            pending_confirmations: self.pending_confirmations.clone(),
+            require_confirmation: self.require_confirmation.clone(),
             data_dir: self.data_dir.clone(),
             download_dir: self.download_dir.clone(),
             chunk_size: self.chunk_size.clone(),
             enable_compression: self.enable_compression.clone(),
             speed_limit_bytes_per_sec: self.speed_limit_bytes_per_sec.clone(),
+            message_store: self.message_store.clone(),
         }
     }
 }

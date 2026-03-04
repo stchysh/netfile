@@ -13,6 +13,7 @@ interface Transfer {
   elapsed_secs: number
   direction: string
   status: string
+  paused: boolean
 }
 
 interface Props {
@@ -59,6 +60,38 @@ function TransferQueue({ transfers }: Props) {
     }
   }
 
+  const handlePause = async (fileId: string) => {
+    try {
+      await invoke('pause_transfer', { fileId })
+    } catch (error) {
+      console.error('Failed to pause transfer:', error)
+    }
+  }
+
+  const handleResume = async (fileId: string) => {
+    try {
+      await invoke('resume_transfer', { fileId })
+    } catch (error) {
+      console.error('Failed to resume transfer:', error)
+    }
+  }
+
+  const handleConfirm = async (fileId: string) => {
+    try {
+      await invoke('confirm_transfer', { fileId })
+    } catch (error) {
+      console.error('Failed to confirm transfer:', error)
+    }
+  }
+
+  const handleReject = async (fileId: string) => {
+    try {
+      await invoke('reject_transfer', { fileId })
+    } catch (error) {
+      console.error('Failed to reject transfer:', error)
+    }
+  }
+
   return (
     <div className="transfer-queue">
       <div className="transfer-queue-header">
@@ -72,6 +105,39 @@ function TransferQueue({ transfers }: Props) {
           </div>
         ) : (
           transfers.map((transfer) => {
+            if (transfer.status === 'pending_confirm') {
+              return (
+                <div key={transfer.file_id} className="transfer-item">
+                  <div className="transfer-header">
+                    <div className="transfer-name-row">
+                      <span className="direction-badge direction-receive">接收</span>
+                      <div className="transfer-name">{transfer.file_name}</div>
+                    </div>
+                    <div className="transfer-header-right">
+                      <span className="transfer-pending-label">待确认</span>
+                    </div>
+                  </div>
+                  <div className="transfer-stats">
+                    <span className="transfer-size">{formatSize(transfer.total_size)}</span>
+                  </div>
+                  <div className="transfer-confirm-buttons">
+                    <button
+                      className="transfer-confirm-button"
+                      onClick={() => handleConfirm(transfer.file_id)}
+                    >
+                      接收
+                    </button>
+                    <button
+                      className="transfer-reject-button"
+                      onClick={() => handleReject(transfer.file_id)}
+                    >
+                      拒绝
+                    </button>
+                  </div>
+                </div>
+              )
+            }
+
             if (transfer.status === 'queued') {
               return (
                 <div key={transfer.file_id} className="transfer-item">
@@ -113,7 +179,30 @@ function TransferQueue({ transfers }: Props) {
                     <div className="transfer-name">{transfer.file_name}</div>
                   </div>
                   <div className="transfer-header-right">
-                    <div className="transfer-progress-text">{progress}%</div>
+                    {transfer.paused ? (
+                      <span className="transfer-paused-label">已暂停</span>
+                    ) : (
+                      <div className="transfer-progress-text">{progress}%</div>
+                    )}
+                    {transfer.direction === 'send' && (
+                      transfer.paused ? (
+                        <button
+                          className="transfer-action-button"
+                          onClick={() => handleResume(transfer.file_id)}
+                          title="继续传输"
+                        >
+                          继续
+                        </button>
+                      ) : (
+                        <button
+                          className="transfer-action-button"
+                          onClick={() => handlePause(transfer.file_id)}
+                          title="暂停传输"
+                        >
+                          暂停
+                        </button>
+                      )
+                    )}
                     <button
                       className="transfer-cancel-button"
                       onClick={() => handleCancel(transfer.file_id)}
@@ -125,7 +214,7 @@ function TransferQueue({ transfers }: Props) {
                 </div>
                 <div className="progress-bar">
                   <div
-                    className="progress-fill"
+                    className={`progress-fill ${transfer.paused ? 'progress-fill-paused' : ''}`}
                     style={{ width: `${progress}%` }}
                   ></div>
                 </div>
@@ -134,10 +223,10 @@ function TransferQueue({ transfers }: Props) {
                     {formatSize(transfer.transferred)} / {formatSize(transfer.total_size)}
                   </span>
                   <span className="transfer-meta">
-                    {transfer.speed > 0 && (
+                    {!transfer.paused && transfer.speed > 0 && (
                       <span className="transfer-speed">{formatSpeed(transfer.speed)}</span>
                     )}
-                    {eta && (
+                    {!transfer.paused && eta && (
                       <span className="transfer-eta">剩余 {eta}</span>
                     )}
                     {elapsed && (

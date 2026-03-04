@@ -42,6 +42,8 @@ pub struct TransferConfig {
     pub download_dir: String,
     #[serde(default)]
     pub speed_limit_mbps: u32,
+    #[serde(default)]
+    pub require_confirmation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +128,7 @@ impl Default for TransferConfig {
             enable_compression: false,
             download_dir: String::new(),
             speed_limit_mbps: 0,
+            require_confirmation: false,
         }
     }
 }

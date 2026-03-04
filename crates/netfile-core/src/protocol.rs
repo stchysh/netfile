@@ -11,6 +11,8 @@ pub enum Message {
     TransferError(TransferError),
     AuthRequest(AuthRequest),
     AuthResponse(AuthResponse),
+    TextMessage(TextMessage),
+    TextAck(TextAck),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +112,20 @@ pub struct AuthRequest {
 pub struct AuthResponse {
     pub accepted: bool,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextMessage {
+    pub id: String,
+    pub from_instance_id: String,
+    pub from_instance_name: String,
+    pub content: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextAck {
+    pub message_id: String,
 }
 
 impl Message {

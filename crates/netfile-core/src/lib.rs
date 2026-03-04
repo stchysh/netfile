@@ -7,6 +7,7 @@ pub mod compression;
 pub mod tls;
 pub mod stun;
 pub mod hole_punch;
+pub mod message_store;
 
 pub use config::Config;
 pub use discovery::{DiscoveryService, Device};
@@ -16,3 +17,4 @@ pub use compression::Compressor;
 pub use tls::TlsManager;
 pub use stun::{StunClient, NatType};
 pub use hole_punch::{UdpHolePuncher, HolePunchRequest, HolePunchResponse};
+pub use message_store::{MessageStore, ChatMessage};

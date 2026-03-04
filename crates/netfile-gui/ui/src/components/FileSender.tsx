@@ -16,6 +16,7 @@ interface Device {
 interface Props {
   device: Device | null
   onClose: () => void
+  embedded?: boolean
 }
 
 interface SelectedFile {
@@ -24,7 +25,7 @@ interface SelectedFile {
   size: number
 }
 
-function FileSender({ device, onClose }: Props) {
+function FileSender({ device, onClose, embedded }: Props) {
   const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([])
   const [enableCompression, setEnableCompression] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -132,16 +133,8 @@ function FileSender({ device, onClose }: Props) {
     setDragOver(false)
   }
 
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>发送文件</h2>
-          <button className="close-button" onClick={onClose}>
-            ×
-          </button>
-        </div>
-
+  const inner = (
+    <>
         <div className="modal-body">
           <div className="target-info">
             <span className="label">发送到:</span>
@@ -224,6 +217,23 @@ function FileSender({ device, onClose }: Props) {
             </button>
           </div>
         </div>
+    </>
+  )
+
+  if (embedded) {
+    return inner
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>发送文件</h2>
+          <button className="close-button" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        {inner}
       </div>
     </div>
   )

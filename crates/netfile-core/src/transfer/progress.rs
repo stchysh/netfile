@@ -15,6 +15,7 @@ pub struct TransferProgress {
     pub elapsed_secs: u64,
     pub direction: String,
     pub status: String,
+    pub paused: bool,
     #[serde(skip)]
     pub start_time: Instant,
     #[serde(skip)]
@@ -36,6 +37,7 @@ impl TransferProgress {
             elapsed_secs: 0,
             direction,
             status: "active".to_string(),
+            paused: false,
             start_time: now,
             last_update: now,
         }
@@ -172,6 +174,23 @@ impl ProgressTracker {
 
     pub async fn remove_progress(&self, file_id: &str) {
         self.progresses.write().await.remove(file_id);
+    }
+
+    pub async fn set_paused(&self, file_id: &str, paused: bool) {
+        if let Some(progress) = self.progresses.write().await.get_mut(file_id) {
+            progress.paused = paused;
+        }
+    }
+
+    pub async fn register_pending_confirm(
+        &self,
+        file_id: String,
+        file_name: String,
+        file_size: u64,
+    ) {
+        let mut progress = TransferProgress::new(file_id.clone(), file_name, file_size, 0, "receive".to_string());
+        progress.status = "pending_confirm".to_string();
+        self.progresses.write().await.insert(file_id, progress);
     }
 
     pub async fn list_all(&self) -> Vec<TransferProgress> {

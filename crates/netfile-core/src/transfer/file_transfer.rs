@@ -325,4 +325,11 @@ impl FileReceiver {
     pub fn resume_from_chunk(&self) -> u32 {
         self.resume_from_chunk
     }
+
+    pub async fn cleanup(&mut self) {
+        if let Some(file) = self.temp_file.take() { drop(file); }
+        let _ = tokio::fs::remove_file(&self.state.temp_file_path).await;
+        let state_path = TransferState::state_file_path(&self.data_dir, &self.state.file_id);
+        let _ = tokio::fs::remove_file(&state_path).await;
+    }
 }

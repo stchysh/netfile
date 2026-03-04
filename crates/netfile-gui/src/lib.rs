@@ -1,4 +1,4 @@
-use netfile_core::{Config, Device, DiscoveryService, TransferProgress, TransferService};
+use netfile_core::{ChatMessage, Config, Device, DiscoveryService, MessageStore, TransferProgress, TransferService};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Manager, State};
@@ -9,6 +9,7 @@ pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub discovery_service: Arc<DiscoveryService>,
     pub transfer_service: Arc<TransferService>,
+    pub message_store: Arc<MessageStore>,
 }
 
 #[tauri::command]
@@ -48,6 +49,73 @@ async fn cancel_transfer(
 ) -> Result<(), String> {
     state.transfer_service.cancel_transfer(&file_id).await;
     Ok(())
+}
+
+#[tauri::command]
+async fn pause_transfer(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<(), String> {
+    state.transfer_service.pause_transfer(&file_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resume_transfer(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<(), String> {
+    state.transfer_service.resume_transfer(&file_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn confirm_transfer(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<(), String> {
+    state.transfer_service.confirm_transfer(&file_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn reject_transfer(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<(), String> {
+    state.transfer_service.reject_transfer(&file_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_text_message(
+    state: State<'_, AppState>,
+    peer_instance_id: String,
+    target_addr: String,
+    content: String,
+) -> Result<(), String> {
+    let addr = target_addr.parse().map_err(|e| format!("无效地址: {}", e))?;
+    let config = state.config.read().await;
+    let from_instance_id = config.instance.instance_id.clone();
+    let from_instance_name = config.instance.instance_name.clone();
+    drop(config);
+    state
+        .transfer_service
+        .send_text_message(&peer_instance_id, addr, content, from_instance_id, from_instance_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_conversation(
+    state: State<'_, AppState>,
+    peer_instance_id: String,
+) -> Result<Vec<ChatMessage>, String> {
+    state
+        .message_store
+        .load_conversation(&peer_instance_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -92,6 +160,7 @@ async fn update_config(
             config.transfer.chunk_size,
             config.transfer.enable_compression,
             config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
+            config.transfer.require_confirmation,
         )
         .await;
     state
@@ -112,6 +181,12 @@ pub fn run() {
             get_transfers,
             send_file,
             cancel_transfer,
+            pause_transfer,
+            resume_transfer,
+            confirm_transfer,
+            reject_transfer,
+            send_text_message,
+            get_conversation,
             get_config,
             update_config,
         ])
@@ -150,7 +225,7 @@ pub fn run() {
                         config.transfer.max_concurrent,
                         config.transfer.chunk_size,
                         data_dir.clone(),
-                        download_dir,
+                        download_dir.clone(),
                         config.transfer.enable_compression,
                         speed_limit_bytes_per_sec,
                     )
@@ -158,6 +233,15 @@ pub fn run() {
                     .expect("Failed to create transfer service"),
                 );
 
+                transfer_service.update_transfer_config(
+                    download_dir,
+                    config.transfer.chunk_size,
+                    config.transfer.enable_compression,
+                    speed_limit_bytes_per_sec,
+                    config.transfer.require_confirmation,
+                ).await;
+
+                let message_store = transfer_service.message_store();
                 let transfer_port = transfer_service.local_port();
 
                 let session_instance_id = Uuid::new_v4().to_string();
@@ -194,6 +278,7 @@ pub fn run() {
                     config: Arc::new(RwLock::new(config)),
                     discovery_service,
                     transfer_service,
+                    message_store,
                 });
 
                 Ok(())

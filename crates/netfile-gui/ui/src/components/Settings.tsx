@@ -21,6 +21,7 @@ interface Config {
     enable_compression: boolean
     download_dir: string
     speed_limit_mbps: number
+    require_confirmation: boolean
   }
   security: {
     require_auth: boolean
@@ -307,6 +308,24 @@ function Settings({ onClose }: Props) {
                   }
                 />
                 <span>启用压缩</span>
+              </label>
+            </div>
+            <div className="form-group checkbox-group">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={config.transfer.require_confirmation}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      transfer: {
+                        ...config.transfer,
+                        require_confirmation: e.target.checked,
+                      },
+                    })
+                  }
+                />
+                <span>需要确认接收</span>
               </label>
             </div>
           </div>

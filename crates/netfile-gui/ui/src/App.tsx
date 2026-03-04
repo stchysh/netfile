@@ -27,6 +27,8 @@ interface Transfer {
   eta_secs: number
   elapsed_secs: number
   direction: string
+  status: string
+  paused: boolean
 }
 
 function App() {

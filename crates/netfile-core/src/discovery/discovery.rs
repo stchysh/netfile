@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio::time;
@@ -13,6 +13,7 @@ const BROADCAST_ADDR: &str = "255.255.255.255";
 const BROADCAST_PORT_START: u16 = 37020;
 const BROADCAST_PORT_END: u16 = 37040;
 const HEARTBEAT_TIMEOUT: u64 = 15;
+const MIN_RECV_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Device {
@@ -33,6 +34,7 @@ pub struct DiscoveryService {
     devices: Arc<RwLock<HashMap<String, Device>>>,
     local_message: Arc<RwLock<DiscoveryMessage>>,
     broadcast_interval: Arc<RwLock<Duration>>,
+    recv_timestamps: Arc<RwLock<HashMap<String, (u64, Instant)>>>,
     local_port: u16,
 }
 
@@ -68,6 +70,7 @@ impl DiscoveryService {
             devices: Arc::new(RwLock::new(HashMap::new())),
             local_message: Arc::new(RwLock::new(local_message)),
             broadcast_interval: Arc::new(RwLock::new(Duration::from_secs(broadcast_interval))),
+            recv_timestamps: Arc::new(RwLock::new(HashMap::new())),
             local_port: port,
         })
     }
@@ -152,6 +155,16 @@ impl DiscoveryService {
             return Ok(());
         }
 
+        {
+            let mut recv_ts = self.recv_timestamps.write().await;
+            if let Some(&(last_ts, last_at)) = recv_ts.get(&message.instance_id) {
+                if message.timestamp <= last_ts || last_at.elapsed() < MIN_RECV_INTERVAL {
+                    return Ok(());
+                }
+            }
+            recv_ts.insert(message.instance_id.clone(), (message.timestamp, Instant::now()));
+        }
+
         let device = Device {
             device_id: message.device_id.clone(),
             instance_id: message.instance_id.clone(),
@@ -182,15 +195,26 @@ impl DiscoveryService {
         let now = SystemTime::now();
         let timeout = Duration::from_secs(HEARTBEAT_TIMEOUT);
 
+        let mut stale_ids = Vec::new();
         let mut devices = self.devices.write().await;
-
-        devices.retain(|_, device| {
-            if let Ok(elapsed) = now.duration_since(device.last_seen) {
-                elapsed < timeout
-            } else {
-                false
+        devices.retain(|instance_id, device| {
+            let keep = match now.duration_since(device.last_seen) {
+                Ok(elapsed) => elapsed < timeout,
+                Err(_) => false,
+            };
+            if !keep {
+                stale_ids.push(instance_id.clone());
             }
+            keep
         });
+        drop(devices);
+
+        if !stale_ids.is_empty() {
+            let mut recv_ts = self.recv_timestamps.write().await;
+            for id in &stale_ids {
+                recv_ts.remove(id);
+            }
+        }
     }
 
     pub async fn get_devices(&self) -> Vec<Device> {

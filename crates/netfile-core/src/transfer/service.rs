@@ -20,10 +20,10 @@ pub struct TransferService {
     progress_tracker: Arc<ProgressTracker>,
     cancelled: Arc<RwLock<HashSet<String>>>,
     data_dir: PathBuf,
-    download_dir: PathBuf,
-    chunk_size: u32,
-    enable_compression: bool,
-    speed_limit_bytes_per_sec: u64,
+    download_dir: Arc<RwLock<PathBuf>>,
+    chunk_size: Arc<RwLock<u32>>,
+    enable_compression: Arc<RwLock<bool>>,
+    speed_limit_bytes_per_sec: Arc<RwLock<u64>>,
 }
 
 impl TransferService {
@@ -62,10 +62,10 @@ impl TransferService {
             progress_tracker: Arc::new(ProgressTracker::new()),
             cancelled: Arc::new(RwLock::new(HashSet::new())),
             data_dir,
-            download_dir,
-            chunk_size,
-            enable_compression,
-            speed_limit_bytes_per_sec,
+            download_dir: Arc::new(RwLock::new(download_dir)),
+            chunk_size: Arc::new(RwLock::new(chunk_size)),
+            enable_compression: Arc::new(RwLock::new(enable_compression)),
+            speed_limit_bytes_per_sec: Arc::new(RwLock::new(speed_limit_bytes_per_sec)),
         })
     }
 
@@ -193,9 +193,10 @@ impl TransferService {
             request.file_name, request.file_size
         );
 
+        let download_dir = self.download_dir.read().await.clone();
         let mut receiver = FileReceiver::new(
             request.clone(),
-            self.download_dir.clone(),
+            download_dir.clone(),
             self.data_dir.clone(),
         )
         .await?;
@@ -219,7 +220,7 @@ impl TransferService {
         let response = TransferResponse {
             file_id: file_id.clone(),
             accepted: true,
-            save_path: Some(self.download_dir.to_string_lossy().to_string()),
+            save_path: Some(download_dir.to_string_lossy().to_string()),
             resume_from_chunk: if resume_from_chunk > 0 { Some(resume_from_chunk) } else { None },
         };
 
@@ -334,7 +335,8 @@ impl TransferService {
     }
 
     pub async fn send_file(&self, file_path: PathBuf, target_addr: SocketAddr) -> Result<String> {
-        self.do_send_file(file_path, None, target_addr, self.enable_compression).await
+        let enable_compression = *self.enable_compression.read().await;
+        self.do_send_file(file_path, None, target_addr, enable_compression).await
     }
 
     pub async fn send_file_with_relative_path(
@@ -343,7 +345,8 @@ impl TransferService {
         relative_path: Option<String>,
         target_addr: SocketAddr,
     ) -> Result<String> {
-        self.do_send_file(file_path, relative_path, target_addr, self.enable_compression).await
+        let enable_compression = *self.enable_compression.read().await;
+        self.do_send_file(file_path, relative_path, target_addr, enable_compression).await
     }
 
     pub async fn send_file_compressed(
@@ -362,6 +365,9 @@ impl TransferService {
         target_addr: SocketAddr,
         enable_compression: bool,
     ) -> Result<String> {
+        let chunk_size = *self.chunk_size.read().await;
+        let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
+
         let metadata = tokio::fs::metadata(&file_path).await?;
         let file_size = metadata.len();
 
@@ -384,7 +390,7 @@ impl TransferService {
             file_name: file_name.clone(),
             relative_path,
             file_size,
-            chunk_size: self.chunk_size,
+            chunk_size,
             device_id: String::new(),
             password_hash: None,
         };
@@ -406,7 +412,7 @@ impl TransferService {
             }
         };
 
-        let total_chunks = ((file_size + self.chunk_size as u64 - 1) / self.chunk_size as u64) as u32;
+        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
 
         self.progress_tracker
             .start_transfer(
@@ -422,7 +428,7 @@ impl TransferService {
         let mut hasher = Sha256::new();
 
         if resume_from > 0 {
-            let skip_bytes = resume_from as u64 * self.chunk_size as u64;
+            let skip_bytes = resume_from as u64 * chunk_size as u64;
             let mut remaining_skip = skip_bytes;
             let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
             while remaining_skip > 0 {
@@ -441,9 +447,9 @@ impl TransferService {
                 return Ok(file_id);
             }
 
-            let offset = chunk_index as u64 * self.chunk_size as u64;
+            let offset = chunk_index as u64 * chunk_size as u64;
             let remaining = file_size - offset;
-            let read_size = (self.chunk_size as u64).min(remaining) as usize;
+            let read_size = (chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0u8; read_size];
             file.read_exact(&mut buffer).await?;
 
@@ -480,8 +486,8 @@ impl TransferService {
 
             debug!("Sent chunk {}/{}", chunk_index + 1, total_chunks);
 
-            if self.speed_limit_bytes_per_sec > 0 {
-                let delay_micros = (chunk_bytes_len * 1_000_000) / self.speed_limit_bytes_per_sec;
+            if speed_limit_bytes_per_sec > 0 {
+                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
                 tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
             }
         }
@@ -514,6 +520,23 @@ impl TransferService {
         self.cancelled.write().await.insert(file_id.to_string());
     }
 
+    pub async fn update_transfer_config(
+        &self,
+        download_dir: PathBuf,
+        chunk_size: u32,
+        enable_compression: bool,
+        speed_limit_bytes_per_sec: u64,
+    ) {
+        *self.download_dir.write().await = download_dir;
+        *self.chunk_size.write().await = chunk_size;
+        *self.enable_compression.write().await = enable_compression;
+        *self.speed_limit_bytes_per_sec.write().await = speed_limit_bytes_per_sec;
+    }
+
+    pub async fn update_max_concurrent(&self, n: usize) {
+        self.task_queue.update_max_concurrent(n).await;
+    }
+
     pub fn progress_tracker(&self) -> Arc<ProgressTracker> {
         self.progress_tracker.clone()
     }
@@ -537,9 +560,9 @@ impl Clone for TransferService {
             cancelled: self.cancelled.clone(),
             data_dir: self.data_dir.clone(),
             download_dir: self.download_dir.clone(),
-            chunk_size: self.chunk_size,
-            enable_compression: self.enable_compression,
-            speed_limit_bytes_per_sec: self.speed_limit_bytes_per_sec,
+            chunk_size: self.chunk_size.clone(),
+            enable_compression: self.enable_compression.clone(),
+            speed_limit_bytes_per_sec: self.speed_limit_bytes_per_sec.clone(),
         }
     }
 }

@@ -64,7 +64,6 @@ function Settings({ onClose }: Props) {
     setSaving(true)
     try {
       await invoke('update_config', { config })
-      alert('配置已保存！需要重启应用生效。')
       onClose()
     } catch (error) {
       console.error('Failed to save config:', error)

@@ -31,8 +31,8 @@ pub struct Device {
 pub struct DiscoveryService {
     socket: Arc<UdpSocket>,
     devices: Arc<RwLock<HashMap<String, Device>>>,
-    local_message: DiscoveryMessage,
-    broadcast_interval: Duration,
+    local_message: Arc<RwLock<DiscoveryMessage>>,
+    broadcast_interval: Arc<RwLock<Duration>>,
     local_port: u16,
 }
 
@@ -66,8 +66,8 @@ impl DiscoveryService {
         Ok(Self {
             socket: Arc::new(socket),
             devices: Arc::new(RwLock::new(HashMap::new())),
-            local_message,
-            broadcast_interval: Duration::from_secs(broadcast_interval),
+            local_message: Arc::new(RwLock::new(local_message)),
+            broadcast_interval: Arc::new(RwLock::new(Duration::from_secs(broadcast_interval))),
             local_port: port,
         })
     }
@@ -108,9 +108,9 @@ impl DiscoveryService {
     }
 
     async fn broadcast_loop(&self) {
-        let mut interval = time::interval(self.broadcast_interval);
         loop {
-            interval.tick().await;
+            let interval = *self.broadcast_interval.read().await;
+            time::sleep(interval).await;
             if let Err(e) = self.broadcast().await {
                 error!("Failed to broadcast: {}", e);
             }
@@ -118,7 +118,7 @@ impl DiscoveryService {
     }
 
     async fn broadcast(&self) -> Result<()> {
-        let data = self.local_message.to_bytes()?;
+        let data = self.local_message.read().await.to_bytes()?;
 
         for port in BROADCAST_PORT_START..=BROADCAST_PORT_END {
             if port == self.local_port {
@@ -148,7 +148,7 @@ impl DiscoveryService {
     async fn handle_message(&self, data: &[u8], addr: SocketAddr) -> Result<()> {
         let message = DiscoveryMessage::from_bytes(data)?;
 
-        if message.instance_id == self.local_message.instance_id {
+        if message.instance_id == self.local_message.read().await.instance_id {
             return Ok(());
         }
 
@@ -196,21 +196,32 @@ impl DiscoveryService {
     pub async fn get_devices(&self) -> Vec<Device> {
         let mut devices: Vec<Device> = self.devices.read().await.values().cloned().collect();
 
-        // 添加本机设备
+        let msg = self.local_message.read().await;
         let local_device = Device {
-            device_id: self.local_message.device_id.clone(),
-            instance_id: self.local_message.instance_id.clone(),
-            device_name: self.local_message.device_name.clone(),
-            instance_name: self.local_message.instance_name.clone(),
+            device_id: msg.device_id.clone(),
+            instance_id: msg.instance_id.clone(),
+            device_name: msg.device_name.clone(),
+            instance_name: msg.instance_name.clone(),
             ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            port: self.local_message.port,
-            version: self.local_message.version.clone(),
+            port: msg.port,
+            version: msg.version.clone(),
             last_seen: SystemTime::now(),
             is_self: true,
         };
+        drop(msg);
         devices.push(local_device);
 
         devices
+    }
+
+    pub async fn update_device_info(&self, device_name: String, instance_name: String) {
+        let mut msg = self.local_message.write().await;
+        msg.device_name = device_name;
+        msg.instance_name = instance_name;
+    }
+
+    pub async fn update_broadcast_interval(&self, secs: u64) {
+        *self.broadcast_interval.write().await = Duration::from_secs(secs);
     }
 
     pub async fn get_device(&self, instance_id: &str) -> Option<Device> {

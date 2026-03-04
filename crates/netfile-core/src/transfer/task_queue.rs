@@ -42,15 +42,19 @@ impl TransferTask {
 
 pub struct TaskQueue {
     tasks: Arc<RwLock<VecDeque<TransferTask>>>,
-    max_concurrent: usize,
+    max_concurrent: Arc<RwLock<usize>>,
 }
 
 impl TaskQueue {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(VecDeque::new())),
-            max_concurrent,
+            max_concurrent: Arc::new(RwLock::new(max_concurrent)),
         }
+    }
+
+    pub async fn update_max_concurrent(&self, n: usize) {
+        *self.max_concurrent.write().await = n;
     }
 
     pub async fn add_task(&self, task: TransferTask) {
@@ -118,6 +122,6 @@ impl TaskQueue {
     }
 
     pub async fn can_start_new(&self) -> bool {
-        self.active_count().await < self.max_concurrent
+        self.active_count().await < *self.max_concurrent.read().await
     }
 }

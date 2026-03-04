@@ -64,7 +64,42 @@ async fn update_config(
     let config_path = Config::default_path();
     config
         .save(&config_path)
-        .map_err(|e| format!("Failed to save config: {}", e))
+        .map_err(|e| format!("Failed to save config: {}", e))?;
+
+    state
+        .discovery_service
+        .update_device_info(
+            config.instance.device_name.clone(),
+            config.instance.instance_name.clone(),
+        )
+        .await;
+    state
+        .discovery_service
+        .update_broadcast_interval(config.network.broadcast_interval)
+        .await;
+
+    let download_dir = if config.transfer.download_dir.is_empty() {
+        dirs::download_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+            .join("NetFile")
+    } else {
+        PathBuf::from(&config.transfer.download_dir)
+    };
+    state
+        .transfer_service
+        .update_transfer_config(
+            download_dir,
+            config.transfer.chunk_size,
+            config.transfer.enable_compression,
+            config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
+        )
+        .await;
+    state
+        .transfer_service
+        .update_max_concurrent(config.transfer.max_concurrent)
+        .await;
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

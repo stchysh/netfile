@@ -14,6 +14,7 @@ interface Transfer {
   direction: string
   status: string
   paused: boolean
+  current_file?: string
 }
 
 interface Props {
@@ -287,6 +288,9 @@ function TransferQueue({ transfers }: Props) {
                     style={{ width: `${progress}%` }}
                   ></div>
                 </div>
+                {transfer.current_file && (
+                  <div className="transfer-current-file">{transfer.current_file}</div>
+                )}
                 <div className="transfer-stats">
                   <span className="transfer-size">
                     {formatSize(transfer.transferred)} / {formatSize(transfer.total_size)}

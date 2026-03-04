@@ -236,6 +236,15 @@
   color: #95a5a6;
 }
 
+.transfer-current-file {
+  font-size: 0.8125rem;
+  color: #7f8c8d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 0.375rem;
+}
+
 .queue-action-button {
   padding: 0.25rem 0.75rem;
   border: none;

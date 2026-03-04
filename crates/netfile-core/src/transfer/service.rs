@@ -429,6 +429,217 @@ impl TransferService {
         self.do_send_file(file_path, relative_path, target_addr, enable_compression).await
     }
 
+    pub async fn send_folder(
+        &self,
+        folder_path: PathBuf,
+        target_addr: SocketAddr,
+        enable_compression: bool,
+    ) -> Result<()> {
+        let folder_name = folder_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("folder")
+            .to_string();
+
+        let entries = super::directory::scan_directory(&folder_path).await?;
+        let file_entries: Vec<_> = entries.into_iter().filter(|e| !e.is_dir).collect();
+
+        if file_entries.is_empty() {
+            return Ok(());
+        }
+
+        let chunk_size = *self.chunk_size.read().await;
+        let total_size: u64 = file_entries.iter().map(|e| e.size).sum();
+        let total_chunks: u32 = file_entries
+            .iter()
+            .map(|e| ((e.size + chunk_size as u64 - 1) / chunk_size as u64) as u32)
+            .sum();
+
+        let folder_id = Uuid::new_v4().to_string();
+
+        self.progress_tracker
+            .register_queued(
+                folder_id.clone(),
+                format!("{}/", folder_name),
+                total_size,
+                total_chunks,
+                "send".to_string(),
+            )
+            .await;
+
+        let _permit = {
+            let sem = self.semaphore.read().await.clone();
+            match sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    self.progress_tracker.remove_progress(&folder_id).await;
+                    return Err(anyhow::anyhow!("Transfer semaphore closed"));
+                }
+            }
+        };
+
+        self.progress_tracker.set_active(&folder_id).await;
+
+        for entry in &file_entries {
+            if self.cancelled.read().await.contains(&folder_id) {
+                break;
+            }
+
+            let current_name = entry.relative_path.to_string_lossy().replace('\\', "/");
+            self.progress_tracker
+                .set_current_file(&folder_id, current_name.clone())
+                .await;
+
+            let abs_path = folder_path.join(&entry.relative_path);
+            let rel = format!("{}/{}", folder_name, current_name);
+
+            if let Err(e) = self
+                .send_file_for_folder(&folder_id, abs_path, Some(rel), target_addr, enable_compression, chunk_size)
+                .await
+            {
+                warn!("Failed to send file in folder {}: {}", current_name, e);
+            }
+        }
+
+        self.progress_tracker.remove_progress(&folder_id).await;
+        self.cancelled.write().await.remove(&folder_id);
+
+        Ok(())
+    }
+
+    async fn send_file_for_folder(
+        &self,
+        folder_id: &str,
+        file_path: PathBuf,
+        relative_path: Option<String>,
+        target_addr: SocketAddr,
+        enable_compression: bool,
+        chunk_size: u32,
+    ) -> Result<()> {
+        let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
+
+        let metadata = tokio::fs::metadata(&file_path).await?;
+        let file_size = metadata.len();
+
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let file_id = {
+            let mut h = Sha256::new();
+            h.update(file_name.as_bytes());
+            h.update(&file_size.to_le_bytes());
+            let r = h.finalize();
+            r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        };
+
+        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+
+        let request = TransferRequest {
+            file_id: file_id.clone(),
+            file_name: file_name.clone(),
+            relative_path,
+            file_size,
+            chunk_size,
+            device_id: String::new(),
+            password_hash: None,
+        };
+
+        let mut stream = TcpStream::connect(target_addr).await?;
+        stream.set_nodelay(true)?;
+
+        Self::write_msg(&mut stream, &Message::TransferRequest(request)).await?;
+
+        let resume_from = {
+            let response = Self::read_msg(&mut stream).await?;
+            if let Message::TransferResponse(resp) = response {
+                if !resp.accepted {
+                    return Err(anyhow::anyhow!("Transfer rejected by receiver"));
+                }
+                resp.resume_from_chunk.unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        let mut file = tokio::fs::File::open(&file_path).await?;
+        let mut hasher = Sha256::new();
+
+        if resume_from > 0 {
+            let skip_bytes = resume_from as u64 * chunk_size as u64;
+            let mut remaining_skip = skip_bytes;
+            let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
+            while remaining_skip > 0 {
+                let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
+                file.read_exact(&mut skip_buf[..read_size]).await?;
+                hasher.update(&skip_buf[..read_size]);
+                remaining_skip -= read_size as u64;
+            }
+        }
+
+        for chunk_index in resume_from..total_chunks {
+            if self.cancelled.read().await.contains(folder_id) {
+                return Ok(());
+            }
+
+            loop {
+                if !self.paused.read().await.contains(folder_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            let offset = chunk_index as u64 * chunk_size as u64;
+            let remaining = file_size - offset;
+            let read_size = (chunk_size as u64).min(remaining) as usize;
+            let mut buffer = vec![0u8; read_size];
+            file.read_exact(&mut buffer).await?;
+
+            hasher.update(&buffer);
+
+            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+                match crate::compression::Compressor::compress(&buffer) {
+                    Ok(c) if c.len() < buffer.len() => (c, true),
+                    _ => (buffer, false),
+                }
+            } else {
+                (buffer, false)
+            };
+
+            let chunk_bytes_len = send_data.len() as u64;
+
+            Self::write_chunk_raw(&mut stream, chunk_index, compressed, &send_data).await?;
+
+            self.progress_tracker.update_progress(folder_id, chunk_bytes_len).await;
+
+            if speed_limit_bytes_per_sec > 0 {
+                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+                tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
+            }
+        }
+
+        let hash_result = hasher.finalize();
+        let mut file_hash = [0u8; 32];
+        file_hash.copy_from_slice(&hash_result);
+
+        Self::write_msg(&mut stream, &Message::TransferComplete(TransferComplete {
+            file_id: file_id.clone(),
+            file_hash,
+        })).await?;
+
+        match Self::read_msg(&mut stream).await? {
+            Message::TransferComplete(_) => {}
+            Message::TransferError(e) => {
+                return Err(anyhow::anyhow!("Receiver error: {}", e.error));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     async fn do_send_file(
         &self,
         file_path: PathBuf,

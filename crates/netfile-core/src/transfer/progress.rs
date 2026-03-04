@@ -16,6 +16,8 @@ pub struct TransferProgress {
     pub direction: String,
     pub status: String,
     pub paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_file: Option<String>,
     #[serde(skip)]
     pub start_time: Instant,
     #[serde(skip)]
@@ -38,6 +40,7 @@ impl TransferProgress {
             direction,
             status: "active".to_string(),
             paused: false,
+            current_file: None,
             start_time: now,
             last_update: now,
         }
@@ -179,6 +182,12 @@ impl ProgressTracker {
     pub async fn set_paused(&self, file_id: &str, paused: bool) {
         if let Some(progress) = self.progresses.write().await.get_mut(file_id) {
             progress.paused = paused;
+        }
+    }
+
+    pub async fn set_current_file(&self, file_id: &str, current_file: String) {
+        if let Some(progress) = self.progresses.write().await.get_mut(file_id) {
+            progress.current_file = Some(current_file);
         }
     }
 

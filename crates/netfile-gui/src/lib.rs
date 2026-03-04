@@ -1,4 +1,4 @@
-use netfile_core::{ChatMessage, Config, Device, DiscoveryService, MessageStore, TransferProgress, TransferService, scan_directory};
+use netfile_core::{ChatMessage, Config, Device, DiscoveryService, MessageStore, TransferProgress, TransferService};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Manager, State};
@@ -36,29 +36,12 @@ async fn send_file(
     }
     let compression = enable_compression.unwrap_or(false);
     if path.is_dir() {
-        let folder_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("folder")
-            .to_string();
-        let entries = scan_directory(&path).await.map_err(|e| e.to_string())?;
-        for entry in entries.iter().filter(|e| !e.is_dir) {
-            let abs_path = path.join(&entry.relative_path);
-            let rel = format!(
-                "{}/{}",
-                folder_name,
-                entry.relative_path.to_string_lossy().replace('\\', "/")
-            );
-            let service = state.transfer_service.clone();
-            tokio::spawn(async move {
-                if let Err(e) = service
-                    .send_file_with_options(abs_path, Some(rel), addr, compression)
-                    .await
-                {
-                    tracing::error!("Failed to send folder file: {}", e);
-                }
-            });
-        }
+        let service = state.transfer_service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = service.send_folder(path, addr, compression).await {
+                tracing::error!("Failed to send folder: {}", e);
+            }
+        });
         Ok(())
     } else {
         state

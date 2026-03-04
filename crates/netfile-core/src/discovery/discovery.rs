@@ -193,7 +193,7 @@ impl DiscoveryService {
                 continue;
             }
 
-            let addr_str = format!("127.0.0.1:{}", port);
+            let addr_str = format!("255.255.255.255:{}", port);
             let _ = self.socket.send_to(&data, &addr_str).await;
         }
 

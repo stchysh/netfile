@@ -732,14 +732,14 @@ impl TransferService {
         let mut stream = match TcpStream::connect(target_addr).await {
             Ok(s) => s,
             Err(e) => {
-                self.progress_tracker.remove_progress(&file_id).await;
+                self.progress_tracker.set_error(&file_id, format!("连接失败: {}", e)).await;
                 return Err(e.into());
             }
         };
         stream.set_nodelay(true)?;
 
         if let Err(e) = Self::write_msg(&mut stream, &Message::TransferRequest(request)).await {
-            self.progress_tracker.remove_progress(&file_id).await;
+            self.progress_tracker.set_error(&file_id, format!("发送请求失败: {}", e)).await;
             return Err(e);
         }
 
@@ -873,7 +873,14 @@ impl TransferService {
     }
 
     pub async fn cancel_transfer(&self, file_id: &str) {
-        self.cancelled.write().await.insert(file_id.to_string());
+        let is_error = self.progress_tracker.get_progress(file_id).await
+            .map(|p| p.status == "error")
+            .unwrap_or(false);
+        if is_error {
+            self.progress_tracker.remove_progress(file_id).await;
+        } else {
+            self.cancelled.write().await.insert(file_id.to_string());
+        }
     }
 
     pub async fn pause_transfer(&self, file_id: &str) {

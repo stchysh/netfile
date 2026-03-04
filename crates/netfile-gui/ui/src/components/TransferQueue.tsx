@@ -15,6 +15,7 @@ interface Transfer {
   status: string
   paused: boolean
   current_file?: string
+  error?: string
 }
 
 interface Props {
@@ -204,6 +205,34 @@ function TransferQueue({ transfers }: Props) {
                       拒绝
                     </button>
                   </div>
+                </div>
+              )
+            }
+
+            if (transfer.status === 'error') {
+              return (
+                <div key={transfer.file_id} className="transfer-item transfer-item-error">
+                  <div className="transfer-header">
+                    <div className="transfer-name-row">
+                      <span className={`direction-badge direction-${transfer.direction}`}>
+                        {transfer.direction === 'send' ? '发送' : '接收'}
+                      </span>
+                      <div className="transfer-name">{transfer.file_name}</div>
+                    </div>
+                    <div className="transfer-header-right">
+                      <span className="transfer-error-label">失败</span>
+                      <button
+                        className="transfer-cancel-button"
+                        onClick={() => handleCancel(transfer.file_id)}
+                        title="关闭"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                  {transfer.error && (
+                    <div className="transfer-error-msg">{transfer.error}</div>
+                  )}
                 </div>
               )
             }

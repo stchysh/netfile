@@ -146,12 +146,15 @@ impl DiscoveryService {
     }
 
     async fn broadcast_loop(&self) {
+        let mut last_full_broadcast: Option<Instant> = None;
+        const FULL_BROADCAST_INTERVAL: Duration = Duration::from_secs(30);
+
         loop {
             let interval = *self.broadcast_interval.read().await;
-            tokio::select! {
-                _ = time::sleep(interval) => {}
-                _ = self.broadcast_notify.notified() => {}
-            }
+            let forced = tokio::select! {
+                _ = time::sleep(interval) => false,
+                _ = self.broadcast_notify.notified() => true,
+            };
 
             {
                 let last = self.last_broadcast_at.read().await;
@@ -170,34 +173,48 @@ impl DiscoveryService {
             {
                 let mut msg = self.local_message.write().await;
                 msg.public_transfer_addr = self.public_transfer_addr.read().await.clone();
+                msg.timestamp = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
             }
 
-            if let Err(e) = self.broadcast().await {
-                error!("Failed to broadcast: {}", e);
+            let known_peers: Vec<SocketAddr> = self.devices.read().await.values()
+                .map(|d| SocketAddr::new(d.ip, d.discovery_port))
+                .collect();
+
+            let needs_full = forced
+                || known_peers.is_empty()
+                || last_full_broadcast.map_or(true, |t| t.elapsed() >= FULL_BROADCAST_INTERVAL);
+
+            if needs_full {
+                last_full_broadcast = Some(Instant::now());
+                if let Err(e) = self.send_full_broadcast().await {
+                    error!("Failed to broadcast: {}", e);
+                }
+            } else {
+                self.send_unicast_to_peers(&known_peers).await;
             }
         }
     }
 
-    async fn broadcast(&self) -> Result<()> {
-        {
-            let mut msg = self.local_message.write().await;
-            msg.timestamp = SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-        }
+    async fn send_full_broadcast(&self) -> Result<()> {
         let data = self.local_message.read().await.to_bytes()?;
-
         for port in BROADCAST_PORT_START..=BROADCAST_PORT_END {
             if port == self.local_port {
                 continue;
             }
-
             let addr_str = format!("255.255.255.255:{}", port);
             let _ = self.socket.send_to(&data, &addr_str).await;
         }
-
         Ok(())
+    }
+
+    async fn send_unicast_to_peers(&self, peers: &[SocketAddr]) {
+        let Ok(data) = self.local_message.read().await.to_bytes() else { return };
+        for &peer_addr in peers {
+            let _ = self.socket.send_to(&data, peer_addr).await;
+        }
     }
 
     async fn receive_loop(&self) {

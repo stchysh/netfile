@@ -259,3 +259,12 @@
 .queue-action-confirm:hover {
   background-color: #219a52;
 }
+
+.queue-action-reject {
+  background-color: #e74c3c;
+  color: white;
+}
+
+.queue-action-reject:hover {
+  background-color: #c0392b;
+}

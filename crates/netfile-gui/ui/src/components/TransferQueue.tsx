@@ -67,6 +67,17 @@ function TransferQueue({ transfers }: Props) {
     }
   }
 
+  const handleRejectAll = async () => {
+    const pending = transfers.filter(t => t.status === 'pending_confirm')
+    for (const t of pending) {
+      try {
+        await invoke('reject_transfer', { fileId: t.file_id })
+      } catch (error) {
+        console.error('Failed to reject transfer:', error)
+      }
+    }
+  }
+
   const handlePauseAll = async () => {
     try {
       await invoke('pause_all_transfers')
@@ -131,6 +142,11 @@ function TransferQueue({ transfers }: Props) {
           {hasPendingConfirm && (
             <button className="queue-action-button queue-action-confirm" onClick={handleConfirmAll}>
               全部接收
+            </button>
+          )}
+          {hasPendingConfirm && (
+            <button className="queue-action-button queue-action-reject" onClick={handleRejectAll}>
+              全部拒绝
             </button>
           )}
           {hasActiveSend && (

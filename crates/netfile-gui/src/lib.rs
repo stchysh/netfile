@@ -317,6 +317,7 @@ async fn update_config(
                 .unwrap_or_default().to_string();
             let local_transfer_port = state.transfer_service.local_port();
             let sc = SignalClient::new(device_id, instance_name, transfer_addr, new_signal_addr, local_transfer_port, message_store);
+            sc.update_nat_type(state.transfer_service.nat_type_str()).await;
             if let Err(e) = sc.connect().await {
                 tracing::warn!("Signal connect failed: {}", e);
             } else {
@@ -354,6 +355,7 @@ async fn connect_signal_server(
         local_transfer_port,
         message_store,
     );
+    sc.update_nat_type(state.transfer_service.nat_type_str()).await;
     sc.connect().await.map_err(|e| e.to_string())?;
     let ts = state.transfer_service.clone();
     sc.set_punch_handler(std::sync::Arc::new(move |addr| {
@@ -590,6 +592,7 @@ pub fn run() {
                         local_transfer_port,
                         message_store.clone(),
                     );
+                    sc.update_nat_type(transfer_service.nat_type_str()).await;
                     if let Ok(()) = sc.connect().await {
                         let ts = transfer_service.clone();
                         sc.set_punch_handler(std::sync::Arc::new(move |addr| {

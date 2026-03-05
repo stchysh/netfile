@@ -313,8 +313,8 @@ async fn update_config(
             let message_store = state.message_store.clone();
             let device_id = config.instance.instance_id.clone();
             let instance_name = config.instance.instance_name.clone();
-            let transfer_addr = state.discovery_service.get_my_public_transfer_addr().await
-                .unwrap_or_default();
+            let transfer_addr = state.transfer_service.public_addr()
+                .unwrap_or_default().to_string();
             let local_transfer_port = state.transfer_service.local_port();
             let sc = SignalClient::new(device_id, instance_name, transfer_addr, new_signal_addr, local_transfer_port, message_store);
             if let Err(e) = sc.connect().await {
@@ -325,10 +325,10 @@ async fn update_config(
                     let ts = ts.clone();
                     tokio::spawn(async move { ts.punch_hole(addr).await; });
                 })).await;
-                let ds = state.discovery_service.clone();
+                let ts_ref = state.transfer_service.clone();
                 let sc_clone = sc.clone();
                 *sc_guard = Some(sc);
-                spawn_stun_watcher(sc_clone, ds);
+                spawn_stun_watcher(sc_clone, ts_ref);
             }
         }
     }
@@ -343,8 +343,8 @@ async fn connect_signal_server(
 ) -> Result<(), String> {
     let config = state.config.read().await.clone();
     let message_store = state.message_store.clone();
-    let transfer_addr = state.discovery_service.get_my_public_transfer_addr().await
-        .unwrap_or_default();
+    let transfer_addr = state.transfer_service.public_addr()
+        .unwrap_or_default().to_string();
     let local_transfer_port = state.transfer_service.local_port();
     let sc = SignalClient::new(
         config.instance.instance_id.clone(),
@@ -360,7 +360,7 @@ async fn connect_signal_server(
         let ts = ts.clone();
         tokio::spawn(async move { ts.punch_hole(addr).await; });
     })).await;
-    let ds = state.discovery_service.clone();
+    let ts_ref = state.transfer_service.clone();
     let sc_clone = sc.clone();
     let mut guard = state.signal_client.write().await;
     if let Some(old) = guard.take() {
@@ -368,7 +368,7 @@ async fn connect_signal_server(
     }
     *guard = Some(sc);
     drop(guard);
-    spawn_stun_watcher(sc_clone, ds);
+    spawn_stun_watcher(sc_clone, ts_ref);
     Ok(())
 }
 
@@ -438,16 +438,13 @@ async fn send_relay_message(
     }
 }
 
-fn spawn_stun_watcher(sc: Arc<SignalClient>, discovery_service: Arc<DiscoveryService>) {
-    tokio::spawn(async move {
-        for _ in 0..60 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            if let Some(addr) = discovery_service.get_my_public_transfer_addr().await {
-                sc.update_transfer_addr(addr).await;
-                break;
-            }
-        }
-    });
+fn spawn_stun_watcher(sc: Arc<SignalClient>, transfer_service: Arc<TransferService>) {
+    if let Some(addr) = transfer_service.public_addr() {
+        let addr = addr.to_string();
+        tokio::spawn(async move {
+            sc.update_transfer_addr(addr).await;
+        });
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -576,8 +573,8 @@ pub fn run() {
                     Arc::new(RwLock::new(None));
 
                 if !config.network.signal_server_addr.is_empty() {
-                    let transfer_addr = discovery_service.get_my_public_transfer_addr().await
-                        .unwrap_or_default();
+                    let transfer_addr = transfer_service.public_addr()
+                        .unwrap_or_default().to_string();
                     let local_transfer_port = transfer_service.local_port();
                     let sc = SignalClient::new(
                         config.instance.instance_id.clone(),
@@ -593,7 +590,7 @@ pub fn run() {
                             let ts = ts.clone();
                             tokio::spawn(async move { ts.punch_hole(addr).await; });
                         })).await;
-                        spawn_stun_watcher(sc.clone(), discovery_service.clone());
+                        spawn_stun_watcher(sc.clone(), transfer_service.clone());
                         *signal_client.write().await = Some(sc);
                     }
                 }

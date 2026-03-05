@@ -43,6 +43,22 @@ impl StunClient {
         Err(anyhow::anyhow!("Failed to get public address from all STUN servers"))
     }
 
+    pub async fn get_public_address_with_socket(&self, socket: &tokio::net::UdpSocket) -> Result<SocketAddr> {
+        for server in &self.stun_servers {
+            match Self::query_with_socket(socket, server).await {
+                Ok(addr) => {
+                    info!("Got public address from {}: {}", server, addr);
+                    return Ok(addr);
+                }
+                Err(e) => {
+                    warn!("Failed to query STUN server {}: {}", server, e);
+                    continue;
+                }
+            }
+        }
+        Err(anyhow::anyhow!("Failed to get public address from all STUN servers"))
+    }
+
     pub async fn get_public_addr_for_port(&self, local_port: u16) -> Result<SocketAddr> {
         let socket = tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", local_port)).await?;
         for server in &self.stun_servers {

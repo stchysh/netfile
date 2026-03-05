@@ -73,6 +73,7 @@ pub struct TransferService {
     tcp_listener: Arc<TcpListener>,
     quic_endpoint: Arc<quinn::Endpoint>,
     transfer_port: u16,
+    public_addr: Option<String>,
     task_queue: Arc<TaskQueue>,
     progress_tracker: Arc<ProgressTracker>,
     cancelled: Arc<RwLock<HashSet<String>>>,
@@ -116,7 +117,31 @@ impl TransferService {
         };
 
         let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        let quic_endpoint = Self::create_quic_endpoint(port, &data_dir).await?;
+
+        let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port))?;
+        std_socket.set_nonblocking(true)?;
+        let tokio_socket = tokio::net::UdpSocket::from_std(std_socket)?;
+
+        let public_addr = match tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::stun::StunClient::new().get_public_address_with_socket(&tokio_socket),
+        ).await {
+            Ok(Ok(addr)) => {
+                info!("STUN discovered public address for QUIC endpoint: {}", addr);
+                Some(addr.to_string())
+            }
+            Ok(Err(e)) => {
+                warn!("STUN query for QUIC endpoint failed: {}", e);
+                None
+            }
+            Err(_) => {
+                warn!("STUN query for QUIC endpoint timed out");
+                None
+            }
+        };
+
+        let std_socket = tokio_socket.into_std()?;
+        let quic_endpoint = Self::create_quic_endpoint_from_socket(std_socket, &data_dir).await?;
         info!("Transfer service listening on port {} (QUIC + TCP relay)", port);
 
         let message_store = Arc::new(MessageStore::new(data_dir.clone()));
@@ -127,6 +152,7 @@ impl TransferService {
             tcp_listener: Arc::new(tcp_listener),
             quic_endpoint: Arc::new(quic_endpoint),
             transfer_port: port,
+            public_addr,
             task_queue: Arc::new(TaskQueue::new(max_concurrent)),
             progress_tracker: Arc::new(ProgressTracker::new()),
             cancelled: Arc::new(RwLock::new(HashSet::new())),
@@ -144,7 +170,7 @@ impl TransferService {
         })
     }
 
-    async fn create_quic_endpoint(port: u16, data_dir: &PathBuf) -> Result<quinn::Endpoint> {
+    async fn create_quic_endpoint_from_socket(socket: std::net::UdpSocket, data_dir: &PathBuf) -> Result<quinn::Endpoint> {
         let tls_mgr = crate::tls::TlsManager::new(data_dir.clone());
         tls_mgr.ensure_certificate().await?;
 
@@ -172,11 +198,17 @@ impl TransferService {
             .map_err(|e| anyhow::anyhow!("QUIC client config error: {}", e))?;
         let client_config = quinn::ClientConfig::new(Arc::new(quic_client));
 
-        let quic_addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-        let mut endpoint = quinn::Endpoint::server(server_config, quic_addr)?;
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| anyhow::anyhow!("no async runtime found"))?;
+        let mut endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            runtime,
+        )?;
         endpoint.set_default_client_config(client_config);
 
-        info!("QUIC endpoint listening on UDP port {}", port);
+        info!("QUIC endpoint created from existing socket");
         Ok(endpoint)
     }
 
@@ -1490,6 +1522,10 @@ impl TransferService {
         self.transfer_port
     }
 
+    pub fn public_addr(&self) -> Option<&str> {
+        self.public_addr.as_deref()
+    }
+
     pub fn task_queue(&self) -> Arc<TaskQueue> {
         self.task_queue.clone()
     }
@@ -1509,6 +1545,7 @@ impl Clone for TransferService {
             tcp_listener: self.tcp_listener.clone(),
             quic_endpoint: self.quic_endpoint.clone(),
             transfer_port: self.transfer_port,
+            public_addr: self.public_addr.clone(),
             task_queue: self.task_queue.clone(),
             progress_tracker: self.progress_tracker.clone(),
             cancelled: self.cancelled.clone(),

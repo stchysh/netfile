@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import DeviceList from './components/DeviceList'
 import TransferQueue from './components/TransferQueue'
+import TransferHistory from './components/TransferHistory'
 import Settings from './components/Settings'
 import './App.css'
 
@@ -37,6 +38,7 @@ function App() {
   const [devices, setDevices] = useState<Device[]>([])
   const [transfers, setTransfers] = useState<Transfer[]>([])
   const [showSettings, setShowSettings] = useState(false)
+  const [activePanel, setActivePanel] = useState<'queue' | 'history'>('queue')
 
   const devicesRef = useRef<string>('')
   const transfersRef = useRef<string>('')
@@ -102,7 +104,27 @@ function App() {
       </header>
       <div className="app-content">
         <DeviceList devices={devices} />
-        <TransferQueue transfers={transfers} />
+        <div className="right-panel">
+          <div className="panel-tabs">
+            <button
+              className={`panel-tab ${activePanel === 'queue' ? 'panel-tab-active' : ''}`}
+              onClick={() => setActivePanel('queue')}
+            >
+              传输队列
+            </button>
+            <button
+              className={`panel-tab ${activePanel === 'history' ? 'panel-tab-active' : ''}`}
+              onClick={() => setActivePanel('history')}
+            >
+              传输记录
+            </button>
+          </div>
+          {activePanel === 'queue' ? (
+            <TransferQueue transfers={transfers} />
+          ) : (
+            <TransferHistory />
+          )}
+        </div>
       </div>
 
       {showSettings && <Settings onClose={() => setShowSettings(false)} />}

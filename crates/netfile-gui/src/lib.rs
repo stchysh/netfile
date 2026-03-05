@@ -1,4 +1,4 @@
-use netfile_core::{ChatMessage, Config, Device, DiscoveryService, MessageStore, TransferProgress, TransferService};
+use netfile_core::{ChatMessage, Config, Device, DiscoveryService, HistoryStore, MessageStore, TransferProgress, TransferRecord, TransferService};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Manager, State};
@@ -10,6 +10,7 @@ pub struct AppState {
     pub discovery_service: Arc<DiscoveryService>,
     pub transfer_service: Arc<TransferService>,
     pub message_store: Arc<MessageStore>,
+    pub history_store: Arc<HistoryStore>,
 }
 
 #[tauri::command]
@@ -160,6 +161,20 @@ async fn get_conversation(
 }
 
 #[tauri::command]
+async fn get_transfer_history(state: State<'_, AppState>) -> Result<Vec<TransferRecord>, String> {
+    Ok(state.history_store.load_history().await)
+}
+
+#[tauri::command]
+async fn clear_transfer_history(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .history_store
+        .clear_history()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
     Ok(state.config.read().await.clone())
 }
@@ -230,6 +245,8 @@ pub fn run() {
             reject_transfer,
             send_text_message,
             get_conversation,
+            get_transfer_history,
+            clear_transfer_history,
             get_config,
             update_config,
             get_my_public_addr,
@@ -286,6 +303,7 @@ pub fn run() {
                 ).await;
 
                 let message_store = transfer_service.message_store();
+                let history_store = transfer_service.history_store();
                 let transfer_port = transfer_service.local_port();
 
                 let session_instance_id = Uuid::new_v4().to_string();
@@ -323,6 +341,7 @@ pub fn run() {
                     discovery_service,
                     transfer_service,
                     message_store,
+                    history_store,
                 });
 
                 Ok(())

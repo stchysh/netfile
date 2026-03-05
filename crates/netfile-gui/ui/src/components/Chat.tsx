@@ -33,7 +33,7 @@ function Chat({ device }: Props) {
   useEffect(() => {
     const load = async () => {
       try {
-        const msgs = await invoke<ChatMessage[]>('get_conversation', { peerInstanceId: device.instance_id })
+        const msgs = await invoke<ChatMessage[]>('get_conversation', { peerInstanceId: device.device_id })
         const json = JSON.stringify(msgs)
         if (json !== lastJsonRef.current) {
           lastJsonRef.current = json
@@ -46,7 +46,7 @@ function Chat({ device }: Props) {
     load()
     const interval = setInterval(load, 1000)
     return () => clearInterval(interval)
-  }, [device.instance_id])
+  }, [device.device_id])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
@@ -66,11 +66,11 @@ function Chat({ device }: Props) {
     const targetAddr = `${device.ip}:${device.port}`
     try {
       await invoke('send_text_message', {
-        peerInstanceId: device.instance_id,
+        peerInstanceId: device.device_id,
         targetAddr,
         content,
       })
-      const msgs = await invoke<ChatMessage[]>('get_conversation', { peerInstanceId: device.instance_id })
+      const msgs = await invoke<ChatMessage[]>('get_conversation', { peerInstanceId: device.device_id })
       const json = JSON.stringify(msgs)
       lastJsonRef.current = json
       setMessages(msgs)

@@ -1,4 +1,5 @@
 use super::file_transfer::FileReceiver;
+use super::history::{HistoryStore, TransferRecord};
 use sha2::{Digest, Sha256};
 use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
@@ -31,6 +32,7 @@ pub struct TransferService {
     enable_compression: Arc<RwLock<bool>>,
     speed_limit_bytes_per_sec: Arc<RwLock<u64>>,
     message_store: Arc<MessageStore>,
+    history_store: Arc<HistoryStore>,
     semaphore: Arc<RwLock<Arc<Semaphore>>>,
 }
 
@@ -64,6 +66,7 @@ impl TransferService {
         info!("Transfer service listening on port {}", port);
 
         let message_store = Arc::new(MessageStore::new(data_dir.clone()));
+        let history_store = Arc::new(HistoryStore::new(data_dir.clone()));
         let semaphore = Arc::new(RwLock::new(Arc::new(Semaphore::new(max_concurrent))));
 
         Ok(Self {
@@ -81,6 +84,7 @@ impl TransferService {
             enable_compression: Arc::new(RwLock::new(enable_compression)),
             speed_limit_bytes_per_sec: Arc::new(RwLock::new(speed_limit_bytes_per_sec)),
             message_store,
+            history_store,
             semaphore,
         })
     }
@@ -348,7 +352,25 @@ impl TransferService {
             }
         }
 
+        let elapsed = self.progress_tracker.get_progress(&progress_id).await
+            .map(|p| p.start_time.elapsed().as_secs())
+            .unwrap_or(0);
         self.progress_tracker.remove_progress(&progress_id).await;
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = self.history_store.add_record(TransferRecord {
+            id: Uuid::new_v4().to_string(),
+            file_name: request.file_name.clone(),
+            file_size: request.file_size,
+            direction: "receive".to_string(),
+            status: "completed".to_string(),
+            error: None,
+            timestamp: ts,
+            elapsed_secs: elapsed,
+        }).await;
 
         Ok(())
     }
@@ -866,8 +888,26 @@ impl TransferService {
             _ => {}
         }
 
+        let elapsed = self.progress_tracker.get_progress(&file_id).await
+            .map(|p| p.start_time.elapsed().as_secs())
+            .unwrap_or(0);
         self.progress_tracker.remove_progress(&file_id).await;
         info!("File transfer completed: {}", file_id);
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = self.history_store.add_record(TransferRecord {
+            id: Uuid::new_v4().to_string(),
+            file_name: file_name.clone(),
+            file_size,
+            direction: "send".to_string(),
+            status: "completed".to_string(),
+            error: None,
+            timestamp: ts,
+            elapsed_secs: elapsed,
+        }).await;
 
         Ok(file_id)
     }
@@ -1002,6 +1042,10 @@ impl TransferService {
     pub fn message_store(&self) -> Arc<MessageStore> {
         self.message_store.clone()
     }
+
+    pub fn history_store(&self) -> Arc<HistoryStore> {
+        self.history_store.clone()
+    }
 }
 
 impl Clone for TransferService {
@@ -1021,6 +1065,7 @@ impl Clone for TransferService {
             enable_compression: self.enable_compression.clone(),
             speed_limit_bytes_per_sec: self.speed_limit_bytes_per_sec.clone(),
             message_store: self.message_store.clone(),
+            history_store: self.history_store.clone(),
             semaphore: self.semaphore.clone(),
         }
     }

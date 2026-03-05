@@ -58,12 +58,44 @@ pub struct SecurityConfig {
     pub enable_tls: bool,
 }
 
+const TITLES: &[&str] = &[
+    "战神", "龙王", "大佬", "天才", "绝世", "无敌", "至尊", "剑神", "鬼才", "邪帝",
+    "魔主", "王者", "传说", "超神", "万古", "逆天", "混沌", "虚空", "上古", "太古",
+    "摸鱼", "内卷", "躺平", "佛系", "养生", "干饭", "暴躁", "社恐", "离谱", "抽象",
+    "破防", "萌系", "毒舌", "傲骨", "孤独", "清醒", "凉薄", "随缘", "散漫", "咸鱼",
+    "迷途", "丧气", "倔强", "执着", "浪荡", "飘零", "落魄", "高冷", "霸道", "腹黑",
+    "低调", "嚣张", "傲娇", "别扭", "迷糊", "鬼马", "爆裂", "佛挡", "神挡", "绝顶",
+];
+
+const NAMES: &[&str] = &[
+    "萧炎", "林动", "张若尘", "苏宇", "叶辰", "唐三", "萧逸", "陆沉", "秦朗", "沈长青",
+    "苏天", "陈长生", "叶玄", "云飞扬", "秦珏", "叶星辰", "林战", "夜煊", "枫扬", "苏铭",
+    "莫浮生", "谢镜渊", "顾莫言", "苏晨", "云霄", "陆晨", "陆离", "苏凉", "叶北", "秦风",
+    "陆鸣", "萧战", "叶天", "林枫", "叶飞", "萧然", "云天", "陈风", "白泽", "叶尘",
+    "令狐冲", "杨过", "张无忌", "乔峰", "段誉", "韦小宝", "郭靖", "慕容复", "石破天", "狄云",
+    "袁承志", "胡斐", "韦一笑", "岳不群", "游坦之", "木婉清", "阿紫", "周芷若", "小龙女", "黄蓉",
+    "孤独患者", "暗里着迷", "凉薄如风", "流年似水", "半城烟沙", "往事随风", "清欢入骨", "烟雨江南",
+    "清风徐来", "冷夜无声", "浅笑安然", "梦里花落", "繁华落尽", "那年初见", "不言殇", "叹浮生",
+    "醉清风", "忆流年", "问苍茫", "望尽天涯", "此心安处", "随遇而安", "陌上行人", "尘埃落定",
+];
+
+pub fn generate_random_name() -> String {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    let title = TITLES[seed % TITLES.len()];
+    let name_idx = (seed / TITLES.len() + seed * 7) % NAMES.len();
+    let name = NAMES[name_idx];
+    format!("{}{}", title, name)
+}
+
 fn generate_instance_id() -> String {
     Uuid::new_v4().to_string()
 }
 
 fn default_instance_name() -> String {
-    "默认实例".to_string()
+    generate_random_name()
 }
 
 fn default_device_name() -> String {
@@ -177,7 +209,7 @@ mod tests {
         let config = Config::default();
 
         assert!(!config.instance.instance_id.is_empty());
-        assert_eq!(config.instance.instance_name, "默认实例");
+        assert!(!config.instance.instance_name.is_empty());
         assert!(!config.instance.device_name.is_empty());
 
         assert_eq!(config.network.discovery_port, 0);

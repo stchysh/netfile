@@ -1,4 +1,4 @@
-use netfile_core::{ChatMessage, Config, Device, DiscoveryService, HistoryStore, MessageStore, TransferProgress, TransferRecord, TransferService};
+use netfile_core::{generate_random_name, ChatMessage, Config, Device, DiscoveryService, HistoryStore, MessageStore, TransferProgress, TransferRecord, TransferService};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -162,6 +162,11 @@ async fn get_conversation(
 }
 
 #[tauri::command]
+fn get_random_name() -> String {
+    generate_random_name()
+}
+
+#[tauri::command]
 async fn get_message_counts(state: State<'_, AppState>) -> Result<HashMap<String, usize>, String> {
     Ok(state.message_store.get_all_counts().await)
 }
@@ -251,6 +256,7 @@ pub fn run() {
             reject_transfer,
             send_text_message,
             get_conversation,
+            get_random_name,
             get_message_counts,
             get_transfer_history,
             clear_transfer_history,

@@ -66,11 +66,66 @@
   align-self: flex-end;
 }
 
+.chat-input-area {
+  border-top: 1px solid #e0e0e0;
+}
+
+.emoji-panel {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 0.5rem;
+  gap: 2px;
+  background-color: #f8f9fa;
+  border-bottom: 1px solid #e0e0e0;
+  max-height: 130px;
+  overflow-y: auto;
+}
+
+.emoji-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 1.25rem;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.emoji-btn:hover {
+  background-color: #e9ecef;
+}
+
+.emoji-toggle-btn {
+  width: 34px;
+  height: 34px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 1.25rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.emoji-toggle-btn:hover,
+.emoji-toggle-btn.active {
+  background-color: #e9ecef;
+  opacity: 1;
+}
+
 .chat-input-row {
   display: flex;
   gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  border-top: 1px solid #e0e0e0;
+  padding: 0.5rem 0.75rem;
+  align-items: center;
 }
 
 .chat-input {

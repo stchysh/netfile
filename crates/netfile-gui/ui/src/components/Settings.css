@@ -190,3 +190,30 @@
 .browse-button:hover {
   background-color: #d5dbdb;
 }
+
+.name-input-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.name-input-row input[type='text'] {
+  flex: 1;
+}
+
+.random-name-button {
+  flex-shrink: 0;
+  padding: 0.75rem 1rem;
+  background-color: #ecf0f1;
+  color: #2c3e50;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.random-name-button:hover {
+  background-color: #d5dbdb;
+}

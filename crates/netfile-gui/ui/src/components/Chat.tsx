@@ -24,11 +24,21 @@ interface Props {
   device: Device
 }
 
+const EMOJIS = [
+  '😊','😂','😭','😅','🤣','😍','🥰','😘','😎','😏',
+  '😒','🙄','😤','😡','🤔','😴','🥳','😱','🤩','💀',
+  '👀','🫡','🤭','😇','🫶','❤️','👍','👎','🙏','💪',
+  '🎉','🔥','💯','✅','👋','🤦','🙈','😆','😋','🤗',
+  '🤫','🫠','💔','😢','😔','🥲','🤷','🫣','😼','🐶',
+]
+
 function Chat({ device }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
+  const [showEmojis, setShowEmojis] = useState(false)
   const lastJsonRef = useRef<string>('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     const load = async () => {
@@ -63,6 +73,7 @@ function Chat({ device }: Props) {
     const content = input.trim()
     if (!content) return
     setInput('')
+    setShowEmojis(false)
     const targetAddr = `${device.ip}:${device.port}`
     try {
       await invoke('send_text_message', {
@@ -84,6 +95,25 @@ function Chat({ device }: Props) {
       e.preventDefault()
       handleSend()
     }
+    if (e.key === 'Escape') {
+      setShowEmojis(false)
+    }
+  }
+
+  const handleEmojiClick = (emoji: string) => {
+    const el = inputRef.current
+    if (el) {
+      const start = el.selectionStart ?? input.length
+      const end = el.selectionEnd ?? input.length
+      const next = input.slice(0, start) + emoji + input.slice(end)
+      setInput(next)
+      setTimeout(() => {
+        el.focus()
+        el.setSelectionRange(start + emoji.length, start + emoji.length)
+      }, 0)
+    } else {
+      setInput(input + emoji)
+    }
   }
 
   return (
@@ -102,18 +132,41 @@ function Chat({ device }: Props) {
         ))}
         <div ref={messagesEndRef} />
       </div>
-      <div className="chat-input-row">
-        <input
-          className="chat-input"
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="输入消息..."
-        />
-        <button className="chat-send-button" onClick={handleSend}>
-          发送
-        </button>
+      <div className="chat-input-area">
+        {showEmojis && (
+          <div className="emoji-panel">
+            {EMOJIS.map((emoji) => (
+              <button
+                key={emoji}
+                className="emoji-btn"
+                onClick={() => handleEmojiClick(emoji)}
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="chat-input-row">
+          <button
+            className={`emoji-toggle-btn ${showEmojis ? 'active' : ''}`}
+            onClick={() => setShowEmojis(!showEmojis)}
+            title="表情"
+          >
+            😊
+          </button>
+          <input
+            ref={inputRef}
+            className="chat-input"
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="输入消息..."
+          />
+          <button className="chat-send-button" onClick={handleSend}>
+            发送
+          </button>
+        </div>
       </div>
     </div>
   )

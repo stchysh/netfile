@@ -55,18 +55,31 @@ function DeviceList({ devices }: Props) {
   const [manualAddr, setManualAddr] = useState('')
   const [manualDevices, setManualDevices] = useState<Device[]>(loadManualDevices)
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set())
+  const [activeChatDeviceId, setActiveChatDeviceId] = useState<string | null>(null)
 
   const msgCountsRef = useRef<Record<string, number>>({})
   const lastReadRef = useRef<Record<string, number>>(loadLastReadCounts())
+  const activeChatRef = useRef<string | null>(null)
+
+  activeChatRef.current = activeChatDeviceId
 
   useEffect(() => {
     const pollCounts = async () => {
       try {
         const counts = await invoke<Record<string, number>>('get_message_counts')
         msgCountsRef.current = counts
+
+        if (activeChatRef.current) {
+          const id = activeChatRef.current
+          if (counts[id] !== undefined) {
+            lastReadRef.current[id] = counts[id]
+            saveLastReadCounts(lastReadRef.current)
+          }
+        }
+
         const newUnread = new Set<string>()
         for (const [id, count] of Object.entries(counts)) {
-          if (count > (lastReadRef.current[id] ?? 0)) {
+          if (id !== activeChatRef.current && count > (lastReadRef.current[id] ?? 0)) {
             newUnread.add(id)
           }
         }
@@ -99,6 +112,17 @@ function DeviceList({ devices }: Props) {
 
   const handleCloseSender = () => {
     setSelectedDevice(null)
+    setActiveChatDeviceId(null)
+  }
+
+  const handleTabChange = (tab: 'files' | 'chat') => {
+    if (!selectedDevice) return
+    if (tab === 'chat') {
+      setActiveChatDeviceId(selectedDevice.device_id || null)
+      markRead(selectedDevice.device_id)
+    } else {
+      setActiveChatDeviceId(null)
+    }
   }
 
   const handleAddManual = () => {
@@ -150,24 +174,27 @@ function DeviceList({ devices }: Props) {
             </div>
           ) : (
             <>
-              {devices.map((device) => (
-                <div key={device.instance_id} className="device-item" onClick={() => setSelectedDevice(device)}>
-                  <div className="device-info">
-                    <div className="device-status online"></div>
-                    <div className="device-details">
-                      <div className="device-name">
-                        {device.instance_name}
-                        <span className={device.is_self ? 'self-badge' : 'instance-name'}>
-                          {' '}({device.is_self ? '本机' : device.ip})
-                        </span>
+              {devices.map((device) => {
+                const hasUnread = !device.is_self && device.device_id
+                  && unreadIds.has(device.device_id)
+                  && activeChatDeviceId !== device.device_id
+                return (
+                  <div key={device.instance_id} className="device-item" onClick={() => setSelectedDevice(device)}>
+                    <div className="device-info">
+                      <div className="device-status online"></div>
+                      <div className="device-details">
+                        <div className="device-name">
+                          {device.instance_name}
+                          <span className={device.is_self ? 'self-badge' : 'instance-name'}>
+                            {' '}({device.is_self ? '本机' : device.ip})
+                          </span>
+                        </div>
                       </div>
                     </div>
+                    {hasUnread && <div className="unread-dot"></div>}
                   </div>
-                  {!device.is_self && device.device_id && unreadIds.has(device.device_id) && (
-                    <div className="unread-dot"></div>
-                  )}
-                </div>
-              ))}
+                )
+              })}
               {manualDevices.map((device) => (
                 <div key={device.instance_id} className="device-item" onClick={() => setSelectedDevice(device)}>
                   <div className="device-info">
@@ -218,7 +245,8 @@ function DeviceList({ devices }: Props) {
         <DeviceModal
           device={selectedDevice}
           onClose={handleCloseSender}
-          onChatRead={() => markRead(selectedDevice.device_id)}
+          startOnChat={!!(selectedDevice.device_id && unreadIds.has(selectedDevice.device_id))}
+          onTabChange={handleTabChange}
         />
       )}
     </>

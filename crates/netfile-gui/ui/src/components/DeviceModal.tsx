@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import FileSender from './FileSender'
 import Chat from './Chat'
 import './DeviceModal.css'
@@ -19,17 +19,29 @@ interface Device {
 interface Props {
   device: Device
   onClose: () => void
-  onChatRead?: () => void
+  startOnChat?: boolean
+  onTabChange?: (tab: 'files' | 'chat') => void
 }
 
 type Tab = 'files' | 'chat'
 
-function DeviceModal({ device, onClose, onChatRead }: Props) {
-  const [tab, setTab] = useState<Tab>('files')
+function DeviceModal({ device, onClose, startOnChat, onTabChange }: Props) {
+  const [tab, setTab] = useState<Tab>(startOnChat ? 'chat' : 'files')
 
-  const handleChatTab = () => {
+  useEffect(() => {
+    if (startOnChat) {
+      onTabChange?.('chat')
+    }
+  }, [])
+
+  const handleTabFiles = () => {
+    setTab('files')
+    onTabChange?.('files')
+  }
+
+  const handleTabChat = () => {
     setTab('chat')
-    onChatRead?.()
+    onTabChange?.('chat')
   }
 
   return (
@@ -43,13 +55,13 @@ function DeviceModal({ device, onClose, onChatRead }: Props) {
           <div className="device-modal-tabs">
             <button
               className={`tab-button ${tab === 'files' ? 'active' : ''}`}
-              onClick={() => setTab('files')}
+              onClick={handleTabFiles}
             >
               文件传输
             </button>
             <button
               className={`tab-button ${tab === 'chat' ? 'active' : ''}`}
-              onClick={handleChatTab}
+              onClick={handleTabChat}
             >
               消息
             </button>

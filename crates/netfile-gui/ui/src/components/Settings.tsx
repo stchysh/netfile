@@ -117,16 +117,30 @@ function Settings({ onClose }: Props) {
             <h3>实例信息</h3>
             <div className="form-group">
               <label>实例名称</label>
-              <input
-                type="text"
-                value={config.instance.instance_name}
-                onChange={(e) =>
-                  setConfig({
-                    ...config,
-                    instance: { ...config.instance, instance_name: e.target.value },
-                  })
-                }
-              />
+              <div className="name-input-row">
+                <input
+                  type="text"
+                  value={config.instance.instance_name}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      instance: { ...config.instance, instance_name: e.target.value },
+                    })
+                  }
+                />
+                <button
+                  className="random-name-button"
+                  onClick={async () => {
+                    try {
+                      const name = await invoke<string>('get_random_name')
+                      setConfig({ ...config, instance: { ...config.instance, instance_name: name } })
+                    } catch {}
+                  }}
+                  title="随机名字"
+                >
+                  随机
+                </button>
+              </div>
             </div>
             <div className="form-group">
               <label>设备名称</label>

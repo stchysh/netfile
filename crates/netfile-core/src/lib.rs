@@ -9,7 +9,7 @@ pub mod stun;
 pub mod hole_punch;
 pub mod message_store;
 
-pub use config::Config;
+pub use config::{Config, generate_random_name};
 pub use discovery::{DiscoveryService, Device};
 pub use transfer::{TransferService, scan_directory, calculate_total_size, count_files, ProgressTracker, TransferProgress, TransferRecord, HistoryStore};
 pub use auth::AuthManager;

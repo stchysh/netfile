@@ -87,7 +87,7 @@ pub fn generate_random_name() -> String {
     let title = TITLES[seed % TITLES.len()];
     let name_idx = (seed / TITLES.len() + seed * 7) % NAMES.len();
     let name = NAMES[name_idx];
-    format!("{}{}", title, name)
+    format!("{}的{}", title, name)
 }
 
 fn generate_instance_id() -> String {

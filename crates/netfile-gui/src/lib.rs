@@ -78,7 +78,7 @@ async fn send_file(
                     let sc_guard = signal_client.read().await;
                     if let Some(sc) = sc_guard.as_ref() {
                         if let Ok(relay_addr) = sc.request_relay(device_id).await {
-                            if let Err(e) = service.send_folder(path, relay_addr, compression).await {
+                            if let Err(e) = service.send_folder_via_relay(path, relay_addr, compression).await {
                                 tracing::error!("Failed to send folder via relay: {}", e);
                             }
                             return;
@@ -101,7 +101,7 @@ async fn send_file(
             if let Some(sc) = sc_guard.as_ref() {
                 if let Ok(relay_addr) = sc.request_relay(device_id).await {
                     return state.transfer_service
-                        .send_file_compressed(path, relay_addr, compression)
+                        .send_file_via_relay(path, relay_addr, compression)
                         .await
                         .map(|_| ())
                         .map_err(|e| e.to_string());

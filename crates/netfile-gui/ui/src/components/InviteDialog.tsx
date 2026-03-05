@@ -14,7 +14,7 @@ interface Props {
 }
 
 function InviteDialog({ onClose }: Props) {
-  const [tab, setTab] = useState<'generate' | 'accept'>('generate')
+  const [tab, setTab] = useState<'generate' | 'accept'>('accept')
   const [inviteCode, setInviteCode] = useState<string>('')
   const [codeError, setCodeError] = useState<string>('')
   const [copied, setCopied] = useState(false)
@@ -65,16 +65,16 @@ function InviteDialog({ onClose }: Props) {
         </div>
         <div className="invite-tabs">
           <button
-            className={`invite-tab${tab === 'generate' ? ' active' : ''}`}
-            onClick={() => setTab('generate')}
-          >
-            生成邀请码
-          </button>
-          <button
             className={`invite-tab${tab === 'accept' ? ' active' : ''}`}
             onClick={() => setTab('accept')}
           >
             输入邀请码
+          </button>
+          <button
+            className={`invite-tab${tab === 'generate' ? ' active' : ''}`}
+            onClick={() => setTab('generate')}
+          >
+            生成邀请码
           </button>
         </div>
         <div className="modal-body">

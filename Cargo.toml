@@ -4,6 +4,7 @@ members = [
     "crates/netfile-cli",
     "crates/netfile-tui",
     "crates/netfile-gui",
+    "crates/netfile-signal",
 ]
 resolver = "2"
 

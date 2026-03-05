@@ -14,6 +14,7 @@ interface Config {
     discovery_port: number
     transfer_port: number
     broadcast_interval: number
+    signal_server_addr: string
   }
   transfer: {
     chunk_size: number
@@ -45,6 +46,7 @@ function Settings({ onClose }: Props) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [myPublicAddr, setMyPublicAddr] = useState<string>('')
+  const [signalConnected, setSignalConnected] = useState(false)
 
   useEffect(() => {
     const loadConfig = async () => {
@@ -61,6 +63,9 @@ function Settings({ onClose }: Props) {
     invoke<string | null>('get_my_public_addr').then((addr) => {
       setMyPublicAddr(addr ?? '')
     }).catch(() => {})
+    invoke<{ connected: boolean }>('get_signal_status').then((s) => {
+      setSignalConnected(s.connected)
+    }).catch(() => {})
   }, [])
 
   const handleSave = async () => {
@@ -75,6 +80,21 @@ function Settings({ onClose }: Props) {
       alert(`保存失败: ${error}`)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSignalToggle = async () => {
+    if (!config) return
+    try {
+      if (signalConnected) {
+        await invoke('disconnect_signal_server')
+        setSignalConnected(false)
+      } else {
+        await invoke('connect_signal_server', { serverAddr: config.network.signal_server_addr })
+        setSignalConnected(true)
+      }
+    } catch (error) {
+      alert(`操作失败: ${error}`)
     }
   }
 
@@ -216,6 +236,26 @@ function Settings({ onClose }: Props) {
                   })
                 }
               />
+            </div>
+            <div className="form-group">
+              <label>信令服务器地址</label>
+              <div className="signal-row">
+                <input
+                  type="text"
+                  value={config.network.signal_server_addr}
+                  placeholder="host:37200"
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      network: { ...config.network, signal_server_addr: e.target.value },
+                    })
+                  }
+                />
+                <button className="signal-connect-btn" onClick={handleSignalToggle}>
+                  {signalConnected ? '断开' : '连接'}
+                </button>
+              </div>
+              {signalConnected && <span className="signal-status-ok">已连接</span>}
             </div>
             <div className="form-group">
               <label>我的公网传输地址</label>

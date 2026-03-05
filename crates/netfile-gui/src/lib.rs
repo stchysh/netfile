@@ -1,4 +1,7 @@
-use netfile_core::{generate_random_name, ChatMessage, Config, Device, DiscoveryService, HistoryStore, MessageStore, TransferProgress, TransferRecord, TransferService};
+use netfile_core::{
+    generate_random_name, ChatMessage, Config, Device, DiscoveryService, FriendInfo, HistoryStore,
+    MessageStore, SignalClient, SignalStatus, TransferProgress, TransferRecord, TransferService,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +15,7 @@ pub struct AppState {
     pub transfer_service: Arc<TransferService>,
     pub message_store: Arc<MessageStore>,
     pub history_store: Arc<HistoryStore>,
+    pub signal_client: Arc<RwLock<Option<Arc<SignalClient>>>>,
 }
 
 #[tauri::command]
@@ -138,15 +142,31 @@ async fn send_text_message(
     content: String,
 ) -> Result<(), String> {
     let addr = target_addr.parse().map_err(|e| format!("无效地址: {}", e))?;
-    let config = state.config.read().await;
-    let from_instance_id = config.instance.instance_id.clone();
-    let from_instance_name = config.instance.instance_name.clone();
-    drop(config);
-    state
+    let (from_instance_id, from_instance_name) = {
+        let config = state.config.read().await;
+        (config.instance.instance_id.clone(), config.instance.instance_name.clone())
+    };
+
+    let result = state
         .transfer_service
-        .send_text_message(&peer_instance_id, addr, content, from_instance_id, from_instance_name)
-        .await
-        .map_err(|e| e.to_string())
+        .send_text_message(&peer_instance_id, addr, content.clone(), from_instance_id, from_instance_name)
+        .await;
+
+    if result.is_err() {
+        let sc_guard = state.signal_client.read().await;
+        if let Some(sc) = sc_guard.as_ref() {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            sc.send_relay_message(&peer_instance_id, content, ts)
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        return result.map_err(|e| e.to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -195,6 +215,9 @@ async fn update_config(
     state: State<'_, AppState>,
     config: Config,
 ) -> Result<(), String> {
+    let old_signal_addr = state.config.read().await.network.signal_server_addr.clone();
+    let new_signal_addr = config.network.signal_server_addr.clone();
+
     *state.config.write().await = config.clone();
     let config_path = Config::default_path();
     config
@@ -235,7 +258,118 @@ async fn update_config(
         .update_max_concurrent(config.transfer.max_concurrent)
         .await;
 
+    if old_signal_addr != new_signal_addr {
+        let mut sc_guard = state.signal_client.write().await;
+        if let Some(old_sc) = sc_guard.take() {
+            old_sc.disconnect().await;
+        }
+        if !new_signal_addr.is_empty() {
+            let message_store = state.message_store.clone();
+            let device_id = config.instance.instance_id.clone();
+            let instance_name = config.instance.instance_name.clone();
+            let transfer_addr = state.discovery_service.get_my_public_transfer_addr().await
+                .unwrap_or_default();
+            let sc = SignalClient::new(device_id, instance_name, transfer_addr, new_signal_addr, message_store);
+            if let Err(e) = sc.connect().await {
+                tracing::warn!("Signal connect failed: {}", e);
+            } else {
+                *sc_guard = Some(sc);
+            }
+        }
+    }
+
     Ok(())
+}
+
+#[tauri::command]
+async fn connect_signal_server(
+    state: State<'_, AppState>,
+    server_addr: String,
+) -> Result<(), String> {
+    let config = state.config.read().await.clone();
+    let message_store = state.message_store.clone();
+    let transfer_addr = state.discovery_service.get_my_public_transfer_addr().await
+        .unwrap_or_default();
+    let sc = SignalClient::new(
+        config.instance.instance_id.clone(),
+        config.instance.instance_name.clone(),
+        transfer_addr,
+        server_addr,
+        message_store,
+    );
+    sc.connect().await.map_err(|e| e.to_string())?;
+    let mut guard = state.signal_client.write().await;
+    if let Some(old) = guard.take() {
+        old.disconnect().await;
+    }
+    *guard = Some(sc);
+    Ok(())
+}
+
+#[tauri::command]
+async fn disconnect_signal_server(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.signal_client.write().await;
+    if let Some(sc) = guard.take() {
+        sc.disconnect().await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_signal_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let guard = state.signal_client.read().await;
+    let connected = match guard.as_ref() {
+        Some(sc) => sc.status().await == SignalStatus::Connected,
+        None => false,
+    };
+    Ok(serde_json::json!({ "connected": connected }))
+}
+
+#[tauri::command]
+async fn generate_invite_code(state: State<'_, AppState>) -> Result<String, String> {
+    let guard = state.signal_client.read().await;
+    match guard.as_ref() {
+        Some(sc) => sc.generate_invite().await.map_err(|e| e.to_string()),
+        None => Err("未连接到信令服务器".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn accept_invite_code(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<FriendInfo, String> {
+    let guard = state.signal_client.read().await;
+    match guard.as_ref() {
+        Some(sc) => sc.accept_invite(code).await.map_err(|e| e.to_string()),
+        None => Err("未连接到信令服务器".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn get_signal_friends(state: State<'_, AppState>) -> Result<Vec<FriendInfo>, String> {
+    let guard = state.signal_client.read().await;
+    match guard.as_ref() {
+        Some(sc) => Ok(sc.get_friends().await),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+async fn send_relay_message(
+    state: State<'_, AppState>,
+    to_device_id: String,
+    content: String,
+) -> Result<(), String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let guard = state.signal_client.read().await;
+    match guard.as_ref() {
+        Some(sc) => sc.send_relay_message(&to_device_id, content, ts).await.map_err(|e| e.to_string()),
+        None => Err("未连接到信令服务器".to_string()),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -263,6 +397,13 @@ pub fn run() {
             get_config,
             update_config,
             get_my_public_addr,
+            connect_signal_server,
+            disconnect_signal_server,
+            get_signal_status,
+            generate_invite_code,
+            accept_invite_code,
+            get_signal_friends,
+            send_relay_message,
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {
@@ -335,19 +476,37 @@ pub fn run() {
                     .expect("Failed to create discovery service"),
                 );
 
-                let discovery_handle = {
+                let _discovery_handle = {
                     let service = discovery_service.clone();
                     tokio::spawn(async move {
                         service.start().await;
                     })
                 };
 
-                let transfer_handle = {
+                let _transfer_handle = {
                     let service = transfer_service.clone();
                     tokio::spawn(async move {
                         service.start().await;
                     })
                 };
+
+                let signal_client: Arc<RwLock<Option<Arc<SignalClient>>>> =
+                    Arc::new(RwLock::new(None));
+
+                if !config.network.signal_server_addr.is_empty() {
+                    let transfer_addr = discovery_service.get_my_public_transfer_addr().await
+                        .unwrap_or_default();
+                    let sc = SignalClient::new(
+                        config.instance.instance_id.clone(),
+                        config.instance.instance_name.clone(),
+                        transfer_addr,
+                        config.network.signal_server_addr.clone(),
+                        message_store.clone(),
+                    );
+                    if let Ok(()) = sc.connect().await {
+                        *signal_client.write().await = Some(sc);
+                    }
+                }
 
                 app.manage(AppState {
                     config: Arc::new(RwLock::new(config)),
@@ -355,6 +514,7 @@ pub fn run() {
                     transfer_service,
                     message_store,
                     history_store,
+                    signal_client,
                 });
 
                 Ok(())

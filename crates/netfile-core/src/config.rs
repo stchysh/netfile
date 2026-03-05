@@ -28,6 +28,8 @@ pub struct NetworkConfig {
     pub transfer_port: u16,
     #[serde(default = "default_broadcast_interval")]
     pub broadcast_interval: u64,
+    #[serde(default)]
+    pub signal_server_addr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +151,7 @@ impl Default for NetworkConfig {
             discovery_port: 0,
             transfer_port: 0,
             broadcast_interval: default_broadcast_interval(),
+            signal_server_addr: String::new(),
         }
     }
 }

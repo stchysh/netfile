@@ -2294,6 +2294,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "netfile-signal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "netfile-tui"
 version = "0.1.0"
 dependencies = [

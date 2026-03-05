@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import DeviceModal from './DeviceModal'
+import InviteDialog from './InviteDialog'
 import './DeviceList.css'
 
 interface Device {
@@ -14,6 +15,13 @@ interface Device {
   is_self: boolean
   public_transfer_addr?: string
   discovery_port?: number
+}
+
+interface FriendInfo {
+  device_id: string
+  instance_name: string
+  online: boolean
+  transfer_addr: string | null
 }
 
 interface Props {
@@ -56,6 +64,8 @@ function DeviceList({ devices }: Props) {
   const [manualDevices, setManualDevices] = useState<Device[]>(loadManualDevices)
   const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set())
   const [activeChatDeviceId, setActiveChatDeviceId] = useState<string | null>(null)
+  const [signalFriends, setSignalFriends] = useState<FriendInfo[]>([])
+  const [showInviteDialog, setShowInviteDialog] = useState(false)
 
   const msgCountsRef = useRef<Record<string, number>>({})
   const lastReadRef = useRef<Record<string, number>>(loadLastReadCounts())
@@ -94,6 +104,24 @@ function DeviceList({ devices }: Props) {
     }
     pollCounts()
     const interval = setInterval(pollCounts, 2000)
+    return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    const pollFriends = async () => {
+      try {
+        const friends = await invoke<FriendInfo[]>('get_signal_friends')
+        setSignalFriends(prev => {
+          const prevStr = JSON.stringify(prev)
+          const nextStr = JSON.stringify(friends)
+          return prevStr === nextStr ? prev : friends
+        })
+      } catch {
+        // ignore
+      }
+    }
+    pollFriends()
+    const interval = setInterval(pollFriends, 2000)
     return () => clearInterval(interval)
   }, [])
 
@@ -158,7 +186,23 @@ function DeviceList({ devices }: Props) {
     saveManualDevices(updated)
   }
 
-  const allDevices = devices.length === 0 && manualDevices.length === 0
+  const handleOpenFriend = (f: FriendInfo) => {
+    const addr = f.transfer_addr ?? ''
+    const colonIdx = addr.lastIndexOf(':')
+    const pseudoDevice: Device = {
+      device_id: f.device_id,
+      instance_id: f.device_id,
+      device_name: 'WAN',
+      instance_name: f.instance_name,
+      ip: colonIdx >= 0 ? addr.slice(0, colonIdx) : addr,
+      port: colonIdx >= 0 ? parseInt(addr.slice(colonIdx + 1)) || 0 : 0,
+      version: '',
+      is_self: false,
+    }
+    setSelectedDevice(pseudoDevice)
+  }
+
+  const allDevices = devices.length === 0 && manualDevices.length === 0 && signalFriends.length === 0
 
   return (
     <>
@@ -195,6 +239,41 @@ function DeviceList({ devices }: Props) {
                   </div>
                 )
               })}
+              {signalFriends.length > 0 && (
+                <div className="friends-section">
+                  <div className="friends-label">网络好友</div>
+                  {signalFriends.filter(f => f.online).map(f => {
+                    const hasUnread = unreadIds.has(f.device_id) && activeChatDeviceId !== f.device_id
+                    return (
+                      <div className="device-item" key={f.device_id} onClick={() => handleOpenFriend(f)}>
+                        <div className="device-info">
+                          <div className="device-status online"></div>
+                          <div className="device-details">
+                            <div className="device-name">
+                              {f.instance_name}
+                              <span className="wan-badge">WAN</span>
+                            </div>
+                          </div>
+                        </div>
+                        {hasUnread && <div className="unread-dot"></div>}
+                      </div>
+                    )
+                  })}
+                  {signalFriends.filter(f => !f.online).map(f => (
+                    <div className="device-item device-item-offline" key={f.device_id}>
+                      <div className="device-info">
+                        <div className="device-status offline"></div>
+                        <div className="device-details">
+                          <div className="device-name">
+                            {f.instance_name}
+                            <span className="offline-badge">离线</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               {manualDevices.map((device) => (
                 <div key={device.instance_id} className="device-item" onClick={() => setSelectedDevice(device)}>
                   <div className="device-info">
@@ -234,9 +313,14 @@ function DeviceList({ devices }: Props) {
               <button className="manual-connect-cancel" onClick={() => { setShowManualInput(false); setManualAddr('') }}>取消</button>
             </div>
           ) : (
-            <button className="manual-connect-button" onClick={() => setShowManualInput(true)}>
-              + 手动添加设备
-            </button>
+            <div className="device-list-footer-btns">
+              <button className="manual-connect-button" onClick={() => setShowManualInput(true)}>
+                + 手动添加设备
+              </button>
+              <button className="invite-btn" onClick={() => setShowInviteDialog(true)}>
+                邀请好友
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -249,6 +333,7 @@ function DeviceList({ devices }: Props) {
           onTabChange={handleTabChange}
         />
       )}
+      {showInviteDialog && <InviteDialog onClose={() => setShowInviteDialog(false)} />}
     </>
   )
 }

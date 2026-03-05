@@ -213,3 +213,79 @@
 .manual-connect-cancel:hover {
   background-color: #b2bec3;
 }
+
+.friends-section {
+  margin-bottom: 0.5rem;
+}
+
+.friends-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #95a5a6;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.25rem 0.25rem 0.5rem;
+}
+
+.wan-badge {
+  display: inline-block;
+  margin-left: 0.375rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  padding: 0.0625rem 0.3125rem;
+  border-radius: 3px;
+  background-color: #d1fae5;
+  color: #065f46;
+  vertical-align: middle;
+}
+
+.offline-badge {
+  display: inline-block;
+  margin-left: 0.375rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  padding: 0.0625rem 0.3125rem;
+  border-radius: 3px;
+  background-color: #f3f4f6;
+  color: #9ca3af;
+  vertical-align: middle;
+}
+
+.device-status.offline {
+  background-color: #b2bec3;
+}
+
+.device-item-offline {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.device-item-offline:hover {
+  background-color: #f8f9fa;
+}
+
+.device-list-footer-btns {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.device-list-footer-btns .manual-connect-button {
+  flex: 1;
+}
+
+.invite-btn {
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px dashed #b2bec3;
+  border-radius: 6px;
+  background-color: transparent;
+  color: #7f8c8d;
+  cursor: pointer;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.invite-btn:hover {
+  background-color: #f8f9fa;
+  color: #2c3e50;
+}

@@ -8,6 +8,7 @@ pub mod tls;
 pub mod stun;
 pub mod hole_punch;
 pub mod message_store;
+pub mod signal_client;
 
 pub use config::{Config, generate_random_name};
 pub use discovery::{DiscoveryService, Device};
@@ -18,3 +19,4 @@ pub use tls::TlsManager;
 pub use stun::{StunClient, NatType};
 pub use hole_punch::{UdpHolePuncher, HolePunchRequest, HolePunchResponse};
 pub use message_store::{MessageStore, ChatMessage};
+pub use signal_client::{SignalClient, FriendInfo, SignalStatus};

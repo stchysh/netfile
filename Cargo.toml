@@ -28,7 +28,7 @@ thiserror = "2.0"
 clap = { version = "4.5", features = ["derive"] }
 sha2 = "0.10"
 zstd = "0.13"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 rcgen = "0.13"
 rustls-pemfile = "2.2"

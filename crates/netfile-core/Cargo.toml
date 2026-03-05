@@ -23,6 +23,7 @@ rcgen.workspace = true
 rustls-pemfile.workspace = true
 stun.workspace = true
 bytes.workspace = true
+quinn.workspace = true
 hostname = "0.4"
 dirs = "5.0"
 crc32fast = "1.4"

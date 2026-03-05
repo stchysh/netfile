@@ -55,6 +55,17 @@ async fn send_file(
         }
     }
 
+    if let Some(device_id) = peer_device_id.as_deref() {
+        let sc_guard = state.signal_client.read().await;
+        if let Some(sc) = sc_guard.as_ref() {
+            let sc = sc.clone();
+            let device_id = device_id.to_string();
+            tokio::spawn(async move {
+                let _ = sc.request_punch(device_id).await;
+            });
+        }
+    }
+
     if path.is_dir() {
         let service = state.transfer_service.clone();
         let signal_client = state.signal_client.clone();
@@ -311,6 +322,11 @@ async fn update_config(
             if let Err(e) = sc.connect().await {
                 tracing::warn!("Signal connect failed: {}", e);
             } else {
+                let ts = state.transfer_service.clone();
+                sc.set_punch_handler(std::sync::Arc::new(move |addr| {
+                    let ts = ts.clone();
+                    tokio::spawn(async move { ts.punch_hole(addr).await; });
+                })).await;
                 let ds = state.discovery_service.clone();
                 let sc_clone = sc.clone();
                 *sc_guard = Some(sc);
@@ -341,6 +357,11 @@ async fn connect_signal_server(
         message_store,
     );
     sc.connect().await.map_err(|e| e.to_string())?;
+    let ts = state.transfer_service.clone();
+    sc.set_punch_handler(std::sync::Arc::new(move |addr| {
+        let ts = ts.clone();
+        tokio::spawn(async move { ts.punch_hole(addr).await; });
+    })).await;
     let ds = state.discovery_service.clone();
     let sc_clone = sc.clone();
     let mut guard = state.signal_client.write().await;
@@ -565,6 +586,11 @@ pub fn run() {
                         message_store.clone(),
                     );
                     if let Ok(()) = sc.connect().await {
+                        let ts = transfer_service.clone();
+                        sc.set_punch_handler(std::sync::Arc::new(move |addr| {
+                            let ts = ts.clone();
+                            tokio::spawn(async move { ts.punch_hole(addr).await; });
+                        })).await;
                         spawn_stun_watcher(sc.clone(), discovery_service.clone());
                         *signal_client.write().await = Some(sc);
                     }

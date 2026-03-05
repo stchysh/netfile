@@ -151,6 +151,7 @@ pub struct SignalClient {
     pending_accept: Arc<Mutex<Option<oneshot::Sender<Result<FriendInfo, String>>>>>,
     pending_punch: Arc<RwLock<HashMap<String, oneshot::Sender<String>>>>,
     pending_relay: Arc<RwLock<HashMap<String, oneshot::Sender<Result<u16, String>>>>>,
+    punch_handler: Arc<RwLock<Option<Arc<dyn Fn(std::net::SocketAddr) + Send + Sync>>>>,
 }
 
 impl SignalClient {
@@ -176,7 +177,12 @@ impl SignalClient {
             pending_accept: Arc::new(Mutex::new(None)),
             pending_punch: Arc::new(RwLock::new(HashMap::new())),
             pending_relay: Arc::new(RwLock::new(HashMap::new())),
+            punch_handler: Arc::new(RwLock::new(None)),
         })
+    }
+
+    pub async fn set_punch_handler(&self, handler: Arc<dyn Fn(std::net::SocketAddr) + Send + Sync>) {
+        *self.punch_handler.write().await = Some(handler);
     }
 
     pub async fn connect(self: &Arc<Self>) -> Result<()> {
@@ -413,13 +419,12 @@ impl SignalClient {
                     let _ = tx.send(peer_addr);
                 }
             }
-            S2cMsg::PunchRequest { initiator_device_id, initiator_addr: _ } => {
-                let client = self.clone();
-                tokio::spawn(async move {
-                    let _ = client.send_msg(&C2sMsg::RequestPunch {
-                        target_device_id: initiator_device_id,
-                    }).await;
-                });
+            S2cMsg::PunchRequest { initiator_device_id: _, initiator_addr } => {
+                if let Ok(addr) = initiator_addr.parse::<std::net::SocketAddr>() {
+                    if let Some(handler) = self.punch_handler.read().await.as_ref() {
+                        handler(addr);
+                    }
+                }
             }
             S2cMsg::RelayedMessage { from_device_id, from_instance_name, content, timestamp } => {
                 let msg = ChatMessage {

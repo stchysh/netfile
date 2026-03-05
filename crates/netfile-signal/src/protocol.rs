@@ -43,6 +43,9 @@ pub enum C2sMsg {
         target_device_id: String,
         session_id: String,
     },
+    UpdateTransferAddr {
+        transfer_addr: String,
+    },
     Heartbeat,
 }
 

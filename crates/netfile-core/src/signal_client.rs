@@ -48,6 +48,9 @@ enum C2sMsg {
         target_device_id: String,
         session_id: String,
     },
+    UpdateTransferAddr {
+        transfer_addr: String,
+    },
     Heartbeat,
 }
 
@@ -322,7 +325,10 @@ impl SignalClient {
     }
 
     pub async fn update_transfer_addr(&self, addr: String) {
-        *self.transfer_addr.write().await = addr;
+        *self.transfer_addr.write().await = addr.clone();
+        if !addr.is_empty() {
+            let _ = self.send_msg(&C2sMsg::UpdateTransferAddr { transfer_addr: addr }).await;
+        }
     }
 
     async fn send_msg(&self, msg: &C2sMsg) -> Result<()> {

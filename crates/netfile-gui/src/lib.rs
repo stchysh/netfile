@@ -311,7 +311,10 @@ async fn update_config(
             if let Err(e) = sc.connect().await {
                 tracing::warn!("Signal connect failed: {}", e);
             } else {
+                let ds = state.discovery_service.clone();
+                let sc_clone = sc.clone();
                 *sc_guard = Some(sc);
+                spawn_stun_watcher(sc_clone, ds);
             }
         }
     }
@@ -338,11 +341,15 @@ async fn connect_signal_server(
         message_store,
     );
     sc.connect().await.map_err(|e| e.to_string())?;
+    let ds = state.discovery_service.clone();
+    let sc_clone = sc.clone();
     let mut guard = state.signal_client.write().await;
     if let Some(old) = guard.take() {
         old.disconnect().await;
     }
     *guard = Some(sc);
+    drop(guard);
+    spawn_stun_watcher(sc_clone, ds);
     Ok(())
 }
 
@@ -410,6 +417,18 @@ async fn send_relay_message(
         Some(sc) => sc.send_relay_message(&to_device_id, content, ts).await.map_err(|e| e.to_string()),
         None => Err("未连接到信令服务器".to_string()),
     }
+}
+
+fn spawn_stun_watcher(sc: Arc<SignalClient>, discovery_service: Arc<DiscoveryService>) {
+    tokio::spawn(async move {
+        for _ in 0..60 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if let Some(addr) = discovery_service.get_my_public_transfer_addr().await {
+                sc.update_transfer_addr(addr).await;
+                break;
+            }
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -546,6 +565,7 @@ pub fn run() {
                         message_store.clone(),
                     );
                     if let Ok(()) = sc.connect().await {
+                        spawn_stun_watcher(sc.clone(), discovery_service.clone());
                         *signal_client.write().await = Some(sc);
                     }
                 }

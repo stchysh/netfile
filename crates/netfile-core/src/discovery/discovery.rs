@@ -83,8 +83,9 @@ impl DiscoveryService {
             let tp = transfer_port;
             tokio::spawn(async move {
                 let client = StunClient::new();
-                match client.get_public_addr_for_port(tp).await {
-                    Ok(addr) => {
+                match client.get_public_address().await {
+                    Ok(mut addr) => {
+                        addr.set_port(tp);
                         let addr_str = addr.to_string();
                         info!("STUN discovered public transfer address: {}", addr_str);
                         *addr_ref.write().await = Some(addr_str.clone());
@@ -201,7 +202,7 @@ impl DiscoveryService {
     async fn send_full_broadcast(&self) -> Result<()> {
         let data = self.local_message.read().await.to_bytes()?;
         for port in BROADCAST_PORT_START..=BROADCAST_PORT_END {
-            let addr_str = format!("255.255.255.255:{}", port);
+            let addr_str = format!("{}:{}", BROADCAST_ADDR, port);
             let _ = self.socket.send_to(&data, &addr_str).await;
         }
         Ok(())

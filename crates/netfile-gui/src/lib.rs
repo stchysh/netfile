@@ -34,35 +34,31 @@ async fn send_file(
     target_addr: String,
     file_path: String,
     enable_compression: Option<bool>,
-    public_addr: Option<String>,
+    _public_addr: Option<String>,
     peer_discovery_addr: Option<String>,
     peer_device_id: Option<String>,
 ) -> Result<(), String> {
-    let addr = target_addr.parse().ok();
+    let addr: Option<std::net::SocketAddr> = target_addr.parse().ok();
     let path = PathBuf::from(&file_path);
     if !path.exists() {
         return Err(format!("文件不存在: {}", file_path));
     }
     let compression = enable_compression.unwrap_or(false);
-    let fallback_addr = public_addr.as_deref().and_then(|s| s.parse().ok());
 
     if let Some(ref da) = peer_discovery_addr {
         if let Ok(disc_addr) = da.parse() {
-            let ds = state.discovery_service.clone();
-            tokio::spawn(async move {
-                let _ = ds.send_punch(disc_addr).await;
-            });
+            let _ = state.discovery_service.send_punch(disc_addr).await;
         }
     }
 
     if let Some(device_id) = peer_device_id.as_deref() {
         let sc_guard = state.signal_client.read().await;
         if let Some(sc) = sc_guard.as_ref() {
-            let sc = sc.clone();
-            let device_id = device_id.to_string();
-            tokio::spawn(async move {
-                let _ = sc.request_punch(device_id).await;
-            });
+            if let Ok(peer_addr_str) = sc.request_punch(device_id.to_string()).await {
+                if let Ok(peer_addr) = peer_addr_str.parse::<std::net::SocketAddr>() {
+                    state.transfer_service.punch_hole(peer_addr).await;
+                }
+            }
         }
     }
 
@@ -73,10 +69,7 @@ async fn send_file(
         tokio::spawn(async move {
             let mut direct_ok = false;
             if let Some(a) = addr {
-                let result = service
-                    .send_folder_with_fallback(path.clone(), a, fallback_addr, compression)
-                    .await;
-                if result.is_ok() {
+                if service.send_folder(path.clone(), a, compression).await.is_ok() {
                     direct_ok = true;
                 }
             }
@@ -85,10 +78,7 @@ async fn send_file(
                     let sc_guard = signal_client.read().await;
                     if let Some(sc) = sc_guard.as_ref() {
                         if let Ok(relay_addr) = sc.request_relay(device_id).await {
-                            if let Err(e) = service
-                                .send_folder_with_fallback(path, relay_addr, None, compression)
-                                .await
-                            {
+                            if let Err(e) = service.send_folder(path, relay_addr, compression).await {
                                 tracing::error!("Failed to send folder via relay: {}", e);
                             }
                             return;
@@ -100,34 +90,25 @@ async fn send_file(
         });
         Ok(())
     } else {
-        let mut direct_result = None;
         if let Some(a) = addr {
-            let result = state
-                .transfer_service
-                .send_file_with_fallback(path.clone(), a, fallback_addr, compression)
-                .await;
-            match result {
-                Ok(_) => return Ok(()),
-                Err(e) => direct_result = Some(e),
+            let result = state.transfer_service.send_file_compressed(path.clone(), a, compression).await;
+            if result.is_ok() {
+                return Ok(());
             }
         }
         if let Some(device_id) = peer_device_id.as_deref() {
             let sc_guard = state.signal_client.read().await;
             if let Some(sc) = sc_guard.as_ref() {
                 if let Ok(relay_addr) = sc.request_relay(device_id).await {
-                    return state
-                        .transfer_service
-                        .send_file_with_fallback(path, relay_addr, None, compression)
+                    return state.transfer_service
+                        .send_file_compressed(path, relay_addr, compression)
                         .await
                         .map(|_| ())
                         .map_err(|e| e.to_string());
                 }
             }
         }
-        match direct_result {
-            Some(e) => Err(e.to_string()),
-            None => Err("无有效地址且无可用中继".to_string()),
-        }
+        Err("无有效地址且无可用中继".to_string())
     }
 }
 

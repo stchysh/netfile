@@ -2298,6 +2298,7 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "netfile-core",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",

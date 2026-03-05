@@ -1586,18 +1586,16 @@ impl TransferService {
 
     pub async fn refresh_public_addr(&self) -> Result<()> {
         let stun_client = crate::stun::StunClient::new();
-        let local_addr = self.quic_endpoint.local_addr()?;
 
-        let std_socket = std::net::UdpSocket::bind(local_addr)?;
-        std_socket.set_nonblocking(true)?;
-        let tokio_socket = tokio::net::UdpSocket::from_std(std_socket)?;
+        let temp_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
 
         match tokio::time::timeout(
             Duration::from_secs(5),
-            stun_client.get_public_address_with_socket(&tokio_socket),
+            stun_client.get_public_address_with_socket(&temp_socket),
         ).await {
             Ok(Ok(addr)) => {
-                let addr_str = addr.to_string();
+                let public_ip = addr.ip();
+                let addr_str = format!("{}:{}", public_ip, self.transfer_port);
                 info!("STUN refresh: public address updated to {}", addr_str);
                 *self.public_addr.write().await = Some(addr_str);
                 Ok(())

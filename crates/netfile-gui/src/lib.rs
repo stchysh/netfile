@@ -442,7 +442,18 @@ async fn send_relay_message(
 
 fn spawn_stun_watcher(sc: Arc<SignalClient>, transfer_service: Arc<TransferService>) {
     tokio::spawn(async move {
+        let _ = transfer_service.refresh_public_addr().await;
+
+        let nat_type_str = transfer_service.nat_type_str();
+        sc.update_nat_type(nat_type_str).await;
+
+        if let Some(addr) = transfer_service.public_addr().await {
+            sc.update_transfer_addr(addr).await;
+        }
+
         loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
             let _ = transfer_service.refresh_public_addr().await;
 
             let nat_type_str = transfer_service.nat_type_str();
@@ -451,8 +462,6 @@ fn spawn_stun_watcher(sc: Arc<SignalClient>, transfer_service: Arc<TransferServi
             if let Some(addr) = transfer_service.public_addr().await {
                 sc.update_transfer_addr(addr).await;
             }
-
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
 }

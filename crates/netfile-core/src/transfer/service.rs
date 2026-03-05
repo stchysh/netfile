@@ -1565,7 +1565,9 @@ impl TransferService {
     }
 
     pub fn nat_type_str(&self) -> String {
-        self.nat_type.blocking_read().as_str().to_string()
+        self.nat_type.try_read()
+            .map(|nt| nt.as_str().to_string())
+            .unwrap_or_else(|_| "cone".to_string())
     }
 
     pub fn task_queue(&self) -> Arc<TaskQueue> {

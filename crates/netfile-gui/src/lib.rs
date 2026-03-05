@@ -313,8 +313,8 @@ async fn update_config(
             let message_store = state.message_store.clone();
             let device_id = config.instance.instance_id.clone();
             let instance_name = config.instance.instance_name.clone();
-            let transfer_addr = state.transfer_service.public_addr()
-                .unwrap_or_default().to_string();
+            let transfer_addr = state.transfer_service.public_addr().await
+                .unwrap_or_default();
             let local_transfer_port = state.transfer_service.local_port();
             let sc = SignalClient::new(device_id, instance_name, transfer_addr, new_signal_addr, local_transfer_port, message_store);
             sc.update_nat_type(state.transfer_service.nat_type_str()).await;
@@ -344,8 +344,8 @@ async fn connect_signal_server(
 ) -> Result<(), String> {
     let config = state.config.read().await.clone();
     let message_store = state.message_store.clone();
-    let transfer_addr = state.transfer_service.public_addr()
-        .unwrap_or_default().to_string();
+    let transfer_addr = state.transfer_service.public_addr().await
+        .unwrap_or_default();
     let local_transfer_port = state.transfer_service.local_port();
     let sc = SignalClient::new(
         config.instance.instance_id.clone(),
@@ -441,18 +441,20 @@ async fn send_relay_message(
 }
 
 fn spawn_stun_watcher(sc: Arc<SignalClient>, transfer_service: Arc<TransferService>) {
-    let nat_type_str = transfer_service.nat_type_str();
-    if let Some(addr) = transfer_service.public_addr() {
-        let addr = addr.to_string();
-        tokio::spawn(async move {
+    tokio::spawn(async move {
+        loop {
+            let _ = transfer_service.refresh_public_addr().await;
+
+            let nat_type_str = transfer_service.nat_type_str();
             sc.update_nat_type(nat_type_str).await;
-            sc.update_transfer_addr(addr).await;
-        });
-    } else {
-        tokio::spawn(async move {
-            sc.update_nat_type(nat_type_str).await;
-        });
-    }
+
+            if let Some(addr) = transfer_service.public_addr().await {
+                sc.update_transfer_addr(addr).await;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -581,8 +583,8 @@ pub fn run() {
                     Arc::new(RwLock::new(None));
 
                 if !config.network.signal_server_addr.is_empty() {
-                    let transfer_addr = transfer_service.public_addr()
-                        .unwrap_or_default().to_string();
+                    let transfer_addr = transfer_service.public_addr().await
+                        .unwrap_or_default();
                     let local_transfer_port = transfer_service.local_port();
                     let sc = SignalClient::new(
                         config.instance.instance_id.clone(),

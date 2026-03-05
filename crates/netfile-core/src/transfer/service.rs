@@ -73,7 +73,7 @@ pub struct TransferService {
     tcp_listener: Arc<TcpListener>,
     quic_endpoint: Arc<quinn::Endpoint>,
     transfer_port: u16,
-    public_addr: Option<String>,
+    public_addr: Arc<RwLock<Option<String>>>,
     nat_type: Arc<RwLock<crate::stun::NatType>>,
     connection_cache: Arc<RwLock<HashMap<SocketAddr, quinn::Connection>>>,
     task_queue: Arc<TaskQueue>,
@@ -174,7 +174,7 @@ impl TransferService {
             tcp_listener: Arc::new(tcp_listener),
             quic_endpoint: Arc::new(quic_endpoint),
             transfer_port: port,
-            public_addr,
+            public_addr: Arc::new(RwLock::new(public_addr)),
             nat_type: Arc::new(RwLock::new(nat_type)),
             connection_cache: Arc::new(RwLock::new(HashMap::new())),
             task_queue: Arc::new(TaskQueue::new(max_concurrent)),
@@ -1576,8 +1576,41 @@ impl TransferService {
         self.transfer_port
     }
 
-    pub fn public_addr(&self) -> Option<&str> {
-        self.public_addr.as_deref()
+    pub async fn public_addr(&self) -> Option<String> {
+        self.public_addr.read().await.clone()
+    }
+
+    pub async fn update_public_addr(&self, addr: Option<String>) {
+        *self.public_addr.write().await = addr;
+    }
+
+    pub async fn refresh_public_addr(&self) -> Result<()> {
+        let stun_client = crate::stun::StunClient::new();
+        let local_addr = self.quic_endpoint.local_addr()?;
+
+        let std_socket = std::net::UdpSocket::bind(local_addr)?;
+        std_socket.set_nonblocking(true)?;
+        let tokio_socket = tokio::net::UdpSocket::from_std(std_socket)?;
+
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            stun_client.get_public_address_with_socket(&tokio_socket),
+        ).await {
+            Ok(Ok(addr)) => {
+                let addr_str = addr.to_string();
+                info!("STUN refresh: public address updated to {}", addr_str);
+                *self.public_addr.write().await = Some(addr_str);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                warn!("STUN refresh failed: {}", e);
+                Err(e)
+            }
+            Err(_) => {
+                warn!("STUN refresh timed out");
+                Err(anyhow::anyhow!("STUN refresh timed out"))
+            }
+        }
     }
 
     pub fn nat_type_str(&self) -> String {

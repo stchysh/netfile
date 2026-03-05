@@ -62,54 +62,43 @@ async fn send_file(
         }
     }
 
-    if path.is_dir() {
-        let service = state.transfer_service.clone();
-        let signal_client = state.signal_client.clone();
-        let peer_device_id = peer_device_id.clone();
-        tokio::spawn(async move {
-            let mut direct_ok = false;
-            if let Some(a) = addr {
-                if service.send_folder(path.clone(), a, compression).await.is_ok() {
-                    direct_ok = true;
-                }
+    let service = state.transfer_service.clone();
+    let signal_client = state.signal_client.clone();
+    let peer_device_id = peer_device_id.clone();
+
+    tokio::spawn(async move {
+        let mut direct_ok = false;
+        if let Some(a) = addr {
+            let result = if path.is_dir() {
+                service.send_folder(path.clone(), a, compression).await.map(|_| ())
+            } else {
+                service.send_file_compressed(path.clone(), a, compression).await.map(|_| ())
+            };
+            if result.is_ok() {
+                direct_ok = true;
             }
-            if !direct_ok {
-                if let Some(device_id) = peer_device_id.as_deref() {
-                    let sc_guard = signal_client.read().await;
-                    if let Some(sc) = sc_guard.as_ref() {
-                        if let Ok(relay_addr) = sc.request_relay(device_id).await {
-                            if let Err(e) = service.send_folder_via_relay(path, relay_addr, compression).await {
-                                tracing::error!("Failed to send folder via relay: {}", e);
-                            }
-                            return;
+        }
+        if !direct_ok {
+            if let Some(device_id) = peer_device_id.as_deref() {
+                let sc_guard = signal_client.read().await;
+                if let Some(sc) = sc_guard.as_ref() {
+                    if let Ok(relay_addr) = sc.request_relay(device_id).await {
+                        let result = if path.is_dir() {
+                            service.send_folder_via_relay(path, relay_addr, compression).await
+                        } else {
+                            service.send_file_via_relay(path, relay_addr, compression).await.map(|_| ())
+                        };
+                        if let Err(e) = result {
+                            tracing::error!("Failed to send via relay: {}", e);
                         }
+                        return;
                     }
                 }
-                tracing::error!("Failed to send folder: no valid address and no relay available");
             }
-        });
-        Ok(())
-    } else {
-        if let Some(a) = addr {
-            let result = state.transfer_service.send_file_compressed(path.clone(), a, compression).await;
-            if result.is_ok() {
-                return Ok(());
-            }
+            tracing::error!("Failed to send: no valid address and no relay available");
         }
-        if let Some(device_id) = peer_device_id.as_deref() {
-            let sc_guard = state.signal_client.read().await;
-            if let Some(sc) = sc_guard.as_ref() {
-                if let Ok(relay_addr) = sc.request_relay(device_id).await {
-                    return state.transfer_service
-                        .send_file_via_relay(path, relay_addr, compression)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| e.to_string());
-                }
-            }
-        }
-        Err("无有效地址且无可用中继".to_string())
-    }
+    });
+    Ok(())
 }
 
 #[tauri::command]

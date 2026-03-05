@@ -904,14 +904,14 @@ impl TransferService {
         };
 
         let conn = match self.quic_endpoint.connect(target_addr, "netfile") {
-            Ok(c) => match tokio::time::timeout(std::time::Duration::from_secs(15), c).await {
+            Ok(c) => match tokio::time::timeout(std::time::Duration::from_secs(3), c).await {
                 Ok(Ok(c)) => c,
                 Ok(Err(e)) => {
-                    self.progress_tracker.set_error(&file_id, format!("QUIC connection failed: {}", e)).await;
+                    self.progress_tracker.remove_progress(&file_id).await;
                     return Err(e.into());
                 }
                 Err(_) => {
-                    self.progress_tracker.set_error(&file_id, "QUIC connection timed out".to_string()).await;
+                    self.progress_tracker.remove_progress(&file_id).await;
                     return Err(anyhow::anyhow!("QUIC connection timed out"));
                 }
             },

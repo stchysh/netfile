@@ -891,9 +891,10 @@ impl TransferService {
     }
 
     pub async fn punch_hole(&self, peer_addr: SocketAddr) {
+        info!("Starting QUIC punch hole to {}", peer_addr);
         if let Ok(connecting) = self.quic_endpoint.connect(peer_addr, "netfile") {
             match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(8),
                 connecting,
             ).await {
                 Ok(Ok(conn)) => {
@@ -901,12 +902,14 @@ impl TransferService {
                     self.connection_cache.write().await.insert(peer_addr, conn);
                 }
                 Ok(Err(e)) => {
-                    debug!("QUIC punch hole failed to {}: {}", peer_addr, e);
+                    warn!("QUIC punch hole failed to {}: {}", peer_addr, e);
                 }
                 Err(_) => {
-                    debug!("QUIC punch hole timed out to {}", peer_addr);
+                    warn!("QUIC punch hole timed out to {} after 8s", peer_addr);
                 }
             }
+        } else {
+            warn!("Failed to initiate QUIC connection to {}", peer_addr);
         }
     }
 
@@ -926,13 +929,26 @@ impl TransferService {
         }
         self.connection_cache.write().await.remove(&target_addr);
 
+        info!("Establishing new QUIC connection to {}", target_addr);
         let conn = match self.quic_endpoint.connect(target_addr, "netfile") {
-            Ok(c) => match tokio::time::timeout(std::time::Duration::from_secs(3), c).await {
-                Ok(Ok(c)) => c,
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => return Err(anyhow::anyhow!("QUIC connection timed out")),
+            Ok(c) => match tokio::time::timeout(std::time::Duration::from_secs(8), c).await {
+                Ok(Ok(c)) => {
+                    info!("QUIC connection established to {}", target_addr);
+                    c
+                }
+                Ok(Err(e)) => {
+                    error!("QUIC connection failed to {}: {}", target_addr, e);
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    error!("QUIC connection timed out to {} after 8s", target_addr);
+                    return Err(anyhow::anyhow!("QUIC connection timed out"));
+                }
             },
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                error!("Failed to initiate QUIC connection to {}: {}", target_addr, e);
+                return Err(e.into());
+            }
         };
         self.connection_cache.write().await.insert(target_addr, conn.clone());
         Ok(conn)

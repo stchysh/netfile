@@ -219,6 +219,19 @@ impl SignalClient {
             write_task.abort();
         });
 
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match self.status.read().await.clone() {
+                    SignalStatus::Connected => return Ok(()),
+                    SignalStatus::Disconnected => return Err(anyhow::anyhow!("服务器断开连接")),
+                    SignalStatus::Connecting => {}
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("连接超时：未收到服务器响应"))??;
+
         Ok(())
     }
 

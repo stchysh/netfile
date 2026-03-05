@@ -36,6 +36,7 @@ async fn send_file(
     enable_compression: Option<bool>,
     public_addr: Option<String>,
     peer_discovery_addr: Option<String>,
+    peer_device_id: Option<String>,
 ) -> Result<(), String> {
     let addr = target_addr.parse().map_err(|e| format!("无效地址: {}", e))?;
     let path = PathBuf::from(&file_path);
@@ -56,19 +57,55 @@ async fn send_file(
 
     if path.is_dir() {
         let service = state.transfer_service.clone();
+        let signal_client = state.signal_client.clone();
+        let peer_device_id = peer_device_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = service.send_folder_with_fallback(path, addr, fallback_addr, compression).await {
-                tracing::error!("Failed to send folder: {}", e);
+            let result = service
+                .send_folder_with_fallback(path.clone(), addr, fallback_addr, compression)
+                .await;
+            if result.is_err() {
+                if let Some(device_id) = peer_device_id.as_deref() {
+                    let sc_guard = signal_client.read().await;
+                    if let Some(sc) = sc_guard.as_ref() {
+                        if let Ok(relay_addr) = sc.request_relay(device_id).await {
+                            if let Err(e) = service
+                                .send_folder_with_fallback(path, relay_addr, None, compression)
+                                .await
+                            {
+                                tracing::error!("Failed to send folder via relay: {}", e);
+                            }
+                            return;
+                        }
+                    }
+                }
+                tracing::error!("Failed to send folder: {}", result.unwrap_err());
             }
         });
         Ok(())
     } else {
-        state
+        let result = state
             .transfer_service
-            .send_file_with_fallback(path, addr, fallback_addr, compression)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .send_file_with_fallback(path.clone(), addr, fallback_addr, compression)
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let Some(device_id) = peer_device_id.as_deref() {
+                    let sc_guard = state.signal_client.read().await;
+                    if let Some(sc) = sc_guard.as_ref() {
+                        if let Ok(relay_addr) = sc.request_relay(device_id).await {
+                            return state
+                                .transfer_service
+                                .send_file_with_fallback(path, relay_addr, None, compression)
+                                .await
+                                .map(|_| ())
+                                .map_err(|e| e.to_string());
+                        }
+                    }
+                }
+                Err(e.to_string())
+            }
+        }
     }
 }
 
@@ -269,7 +306,8 @@ async fn update_config(
             let instance_name = config.instance.instance_name.clone();
             let transfer_addr = state.discovery_service.get_my_public_transfer_addr().await
                 .unwrap_or_default();
-            let sc = SignalClient::new(device_id, instance_name, transfer_addr, new_signal_addr, message_store);
+            let local_transfer_port = state.transfer_service.local_port();
+            let sc = SignalClient::new(device_id, instance_name, transfer_addr, new_signal_addr, local_transfer_port, message_store);
             if let Err(e) = sc.connect().await {
                 tracing::warn!("Signal connect failed: {}", e);
             } else {
@@ -290,11 +328,13 @@ async fn connect_signal_server(
     let message_store = state.message_store.clone();
     let transfer_addr = state.discovery_service.get_my_public_transfer_addr().await
         .unwrap_or_default();
+    let local_transfer_port = state.transfer_service.local_port();
     let sc = SignalClient::new(
         config.instance.instance_id.clone(),
         config.instance.instance_name.clone(),
         transfer_addr,
         server_addr,
+        local_transfer_port,
         message_store,
     );
     sc.connect().await.map_err(|e| e.to_string())?;
@@ -496,11 +536,13 @@ pub fn run() {
                 if !config.network.signal_server_addr.is_empty() {
                     let transfer_addr = discovery_service.get_my_public_transfer_addr().await
                         .unwrap_or_default();
+                    let local_transfer_port = transfer_service.local_port();
                     let sc = SignalClient::new(
                         config.instance.instance_id.clone(),
                         config.instance.instance_name.clone(),
                         transfer_addr,
                         config.network.signal_server_addr.clone(),
+                        local_transfer_port,
                         message_store.clone(),
                     );
                     if let Ok(()) = sc.connect().await {

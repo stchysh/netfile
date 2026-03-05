@@ -2,6 +2,7 @@ use crate::message_store::{ChatMessage, MessageStore};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -42,6 +43,10 @@ enum C2sMsg {
         to_device_id: String,
         content: String,
         timestamp: u64,
+    },
+    RequestRelay {
+        target_device_id: String,
+        session_id: String,
     },
     Heartbeat,
 }
@@ -85,6 +90,18 @@ enum S2cMsg {
     OfflineMessages {
         messages: Vec<OfflineMsg>,
     },
+    RelaySession {
+        session_id: String,
+        relay_port: u16,
+    },
+    IncomingRelay {
+        session_id: String,
+        relay_port: u16,
+    },
+    RelayUnavailable {
+        session_id: String,
+        reason: String,
+    },
     Error {
         message: String,
     },
@@ -122,6 +139,7 @@ pub struct SignalClient {
     instance_name: Arc<RwLock<String>>,
     transfer_addr: Arc<RwLock<String>>,
     server_addr: String,
+    local_transfer_port: u16,
     status: Arc<RwLock<SignalStatus>>,
     friends: Arc<RwLock<Vec<FriendInfo>>>,
     message_store: Arc<MessageStore>,
@@ -129,6 +147,7 @@ pub struct SignalClient {
     pending_invite: Arc<Mutex<Option<oneshot::Sender<String>>>>,
     pending_accept: Arc<Mutex<Option<oneshot::Sender<Result<FriendInfo, String>>>>>,
     pending_punch: Arc<RwLock<HashMap<String, oneshot::Sender<String>>>>,
+    pending_relay: Arc<RwLock<HashMap<String, oneshot::Sender<Result<u16, String>>>>>,
 }
 
 impl SignalClient {
@@ -137,6 +156,7 @@ impl SignalClient {
         instance_name: String,
         transfer_addr: String,
         server_addr: String,
+        local_transfer_port: u16,
         message_store: Arc<MessageStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -144,6 +164,7 @@ impl SignalClient {
             instance_name: Arc::new(RwLock::new(instance_name)),
             transfer_addr: Arc::new(RwLock::new(transfer_addr)),
             server_addr,
+            local_transfer_port,
             status: Arc::new(RwLock::new(SignalStatus::Disconnected)),
             friends: Arc::new(RwLock::new(Vec::new())),
             message_store,
@@ -151,6 +172,7 @@ impl SignalClient {
             pending_invite: Arc::new(Mutex::new(None)),
             pending_accept: Arc::new(Mutex::new(None)),
             pending_punch: Arc::new(RwLock::new(HashMap::new())),
+            pending_relay: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -252,6 +274,47 @@ impl SignalClient {
             timestamp,
         })
         .await
+    }
+
+    pub async fn request_relay(self: &Arc<Self>, target_device_id: &str) -> Result<SocketAddr> {
+        let session_id = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel::<Result<u16, String>>();
+        self.pending_relay.write().await.insert(session_id.clone(), tx);
+
+        self.send_msg(&C2sMsg::RequestRelay {
+            target_device_id: target_device_id.to_string(),
+            session_id: session_id.clone(),
+        })
+        .await?;
+
+        let relay_port = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .map_err(|_| {
+                let _ = self.pending_relay.try_write().map(|mut m| m.remove(&session_id));
+                anyhow::anyhow!("relay 请求超时")
+            })?
+            .map_err(|_| anyhow::anyhow!("通道关闭"))?
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let server_host = self.server_addr
+            .rsplit_once(':')
+            .map(|(h, _)| h.to_string())
+            .unwrap_or_else(|| self.server_addr.clone());
+        let relay_server_addr = format!("{}:{}", server_host, relay_port);
+
+        let mut relay_stream = TcpStream::connect(&relay_server_addr).await?;
+        relay_stream.write_all(session_id.as_bytes()).await?;
+
+        let local_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let local_addr = local_listener.local_addr()?;
+
+        tokio::spawn(async move {
+            if let Ok((mut local_conn, _)) = local_listener.accept().await {
+                let _ = tokio::io::copy_bidirectional(&mut local_conn, &mut relay_stream).await;
+            }
+        });
+
+        Ok(local_addr)
     }
 
     pub async fn update_instance_name(&self, name: String) {
@@ -362,6 +425,41 @@ impl SignalClient {
                     };
                     let _ = self.message_store.save_message(&om.from_device_id, msg).await;
                 }
+            }
+            S2cMsg::RelaySession { session_id, relay_port } => {
+                let tx = self.pending_relay.write().await.remove(&session_id);
+                if let Some(tx) = tx {
+                    let _ = tx.send(Ok(relay_port));
+                }
+            }
+            S2cMsg::RelayUnavailable { session_id, reason } => {
+                let tx = self.pending_relay.write().await.remove(&session_id);
+                if let Some(tx) = tx {
+                    let _ = tx.send(Err(reason));
+                }
+            }
+            S2cMsg::IncomingRelay { session_id, relay_port } => {
+                let server_host = self.server_addr
+                    .rsplit_once(':')
+                    .map(|(h, _)| h.to_string())
+                    .unwrap_or_else(|| self.server_addr.clone());
+                let local_transfer_port = self.local_transfer_port;
+                tokio::spawn(async move {
+                    let relay_server_addr = format!("{}:{}", server_host, relay_port);
+                    let mut relay_stream = match TcpStream::connect(&relay_server_addr).await {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    if relay_stream.write_all(session_id.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let mut local_stream =
+                        match TcpStream::connect(format!("127.0.0.1:{}", local_transfer_port)).await {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+                    let _ = tokio::io::copy_bidirectional(&mut relay_stream, &mut local_stream).await;
+                });
             }
             S2cMsg::Error { .. } => {}
         }

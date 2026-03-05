@@ -39,6 +39,10 @@ pub enum C2sMsg {
         content: String,
         timestamp: u64,
     },
+    RequestRelay {
+        target_device_id: String,
+        session_id: String,
+    },
     Heartbeat,
 }
 
@@ -80,6 +84,18 @@ pub enum S2cMsg {
     },
     OfflineMessages {
         messages: Vec<OfflineMsg>,
+    },
+    RelaySession {
+        session_id: String,
+        relay_port: u16,
+    },
+    IncomingRelay {
+        session_id: String,
+        relay_port: u16,
+    },
+    RelayUnavailable {
+        session_id: String,
+        reason: String,
     },
     Error {
         message: String,

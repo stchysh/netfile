@@ -119,6 +119,7 @@ function FileSender({ device, onClose, embedded }: Props) {
         enableCompression,
         publicAddr,
         peerDiscoveryAddr,
+        peerDeviceId: device.device_id || null,
       })
     }
     onClose()

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
@@ -23,15 +24,19 @@ pub struct ServerState {
     friends: RwLock<HashMap<String, HashSet<String>>>,
     invite_codes: RwLock<HashMap<String, InviteEntry>>,
     offline_msgs: RwLock<HashMap<String, Vec<OfflineMsg>>>,
+    relay_sessions: RwLock<HashMap<String, mpsc::Sender<TcpStream>>>,
+    pub relay_port: Option<u16>,
 }
 
 impl ServerState {
-    pub fn new() -> Arc<Self> {
+    pub fn new(relay_port: Option<u16>) -> Arc<Self> {
         Arc::new(Self {
             online: RwLock::new(HashMap::new()),
             friends: RwLock::new(HashMap::new()),
             invite_codes: RwLock::new(HashMap::new()),
             offline_msgs: RwLock::new(HashMap::new()),
+            relay_sessions: RwLock::new(HashMap::new()),
+            relay_port,
         })
     }
 }
@@ -267,6 +272,63 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                     }
                 }
             }
+            C2sMsg::RequestRelay { target_device_id, session_id } => {
+                let rport = match state.relay_port {
+                    None => {
+                        let _ = tx.send(S2cMsg::RelayUnavailable {
+                            session_id,
+                            reason: "服务端未开启文件中继".to_string(),
+                        }).await;
+                        continue;
+                    }
+                    Some(p) => p,
+                };
+
+                let is_friend = {
+                    let friends_map = state.friends.read().await;
+                    friends_map.get(&device_id).map_or(false, |s| s.contains(&target_device_id))
+                };
+                if !is_friend {
+                    let _ = tx.send(S2cMsg::RelayUnavailable {
+                        session_id,
+                        reason: "非好友".to_string(),
+                    }).await;
+                    continue;
+                }
+
+                let target_tx = {
+                    let online_map = state.online.read().await;
+                    online_map.get(&target_device_id).map(|e| e.tx.clone())
+                };
+                match target_tx {
+                    None => {
+                        let _ = tx.send(S2cMsg::RelayUnavailable {
+                            session_id,
+                            reason: "目标设备不在线".to_string(),
+                        }).await;
+                    }
+                    Some(target_tx) => {
+                        let (stream_tx, stream_rx) = mpsc::channel::<TcpStream>(2);
+                        {
+                            let mut sessions = state.relay_sessions.write().await;
+                            sessions.insert(session_id.clone(), stream_tx);
+                        }
+                        let state_clone = state.clone();
+                        let sid = session_id.clone();
+                        tokio::spawn(async move {
+                            pipe_relay_session(state_clone, sid, stream_rx).await;
+                        });
+                        let _ = target_tx.try_send(S2cMsg::IncomingRelay {
+                            session_id: session_id.clone(),
+                            relay_port: rport,
+                        });
+                        let _ = tx.send(S2cMsg::RelaySession {
+                            session_id,
+                            relay_port: rport,
+                        }).await;
+                    }
+                }
+            }
         }
     }
 
@@ -290,8 +352,52 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
     }
 }
 
+pub async fn handle_relay_connection(state: Arc<ServerState>, mut stream: TcpStream) {
+    let mut id_buf = [0u8; 36];
+    if stream.read_exact(&mut id_buf).await.is_err() {
+        return;
+    }
+    let session_id = match std::str::from_utf8(&id_buf) {
+        Ok(s) => s.to_string(),
+        Err(_) => return,
+    };
+    let tx = state.relay_sessions.read().await.get(&session_id).cloned();
+    if let Some(tx) = tx {
+        let _ = tx.send(stream).await;
+    }
+}
+
+async fn pipe_relay_session(
+    state: Arc<ServerState>,
+    session_id: String,
+    mut rx: mpsc::Receiver<TcpStream>,
+) {
+    let timeout = Duration::from_secs(30);
+
+    let stream_a = match tokio::time::timeout(timeout, rx.recv()).await {
+        Ok(Some(s)) => s,
+        _ => {
+            state.relay_sessions.write().await.remove(&session_id);
+            return;
+        }
+    };
+    let stream_b = match tokio::time::timeout(timeout, rx.recv()).await {
+        Ok(Some(s)) => s,
+        _ => {
+            state.relay_sessions.write().await.remove(&session_id);
+            return;
+        }
+    };
+    state.relay_sessions.write().await.remove(&session_id);
+
+    let (mut ra, mut wa) = stream_a.into_split();
+    let (mut rb, mut wb) = stream_b.into_split();
+    let t1 = tokio::spawn(async move { tokio::io::copy(&mut ra, &mut wb).await });
+    let t2 = tokio::spawn(async move { tokio::io::copy(&mut rb, &mut wa).await });
+    let _ = tokio::join!(t1, t2);
+}
+
 async fn read_c2s_half(stream: &mut tokio::net::tcp::OwnedReadHalf) -> anyhow::Result<C2sMsg> {
-    use tokio::io::AsyncReadExt;
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;

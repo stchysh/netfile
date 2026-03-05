@@ -439,10 +439,16 @@ async fn send_relay_message(
 }
 
 fn spawn_stun_watcher(sc: Arc<SignalClient>, transfer_service: Arc<TransferService>) {
+    let nat_type_str = transfer_service.nat_type_str();
     if let Some(addr) = transfer_service.public_addr() {
         let addr = addr.to_string();
         tokio::spawn(async move {
+            sc.update_nat_type(nat_type_str).await;
             sc.update_transfer_addr(addr).await;
+        });
+    } else {
+        tokio::spawn(async move {
+            sc.update_nat_type(nat_type_str).await;
         });
     }
 }

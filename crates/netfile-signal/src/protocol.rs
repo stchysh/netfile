@@ -26,12 +26,19 @@ pub enum C2sMsg {
         device_id: String,
         instance_name: String,
         transfer_addr: String,
+        #[serde(default)]
+        nat_type: String,
     },
     GenerateInvite,
     AcceptInvite {
         code: String,
     },
     RequestPunch {
+        target_device_id: String,
+        #[serde(default)]
+        nat_type: String,
+    },
+    PunchReady {
         target_device_id: String,
     },
     RelayMessage {
@@ -74,10 +81,19 @@ pub enum S2cMsg {
     PunchCoordinate {
         peer_addr: String,
         peer_device_id: String,
+        #[serde(default)]
+        peer_nat_type: String,
     },
     PunchRequest {
         initiator_device_id: String,
         initiator_addr: String,
+        #[serde(default)]
+        initiator_nat_type: String,
+    },
+    PunchStart {
+        peer_addr: String,
+        peer_device_id: String,
+        peer_nat_type: String,
     },
     RelayedMessage {
         from_device_id: String,

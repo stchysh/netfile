@@ -31,12 +31,19 @@ enum C2sMsg {
         device_id: String,
         instance_name: String,
         transfer_addr: String,
+        #[serde(default)]
+        nat_type: String,
     },
     GenerateInvite,
     AcceptInvite {
         code: String,
     },
     RequestPunch {
+        target_device_id: String,
+        #[serde(default)]
+        nat_type: String,
+    },
+    PunchReady {
         target_device_id: String,
     },
     RelayMessage {
@@ -79,10 +86,19 @@ enum S2cMsg {
     PunchCoordinate {
         peer_addr: String,
         peer_device_id: String,
+        #[serde(default)]
+        peer_nat_type: String,
     },
     PunchRequest {
         initiator_device_id: String,
         initiator_addr: String,
+        #[serde(default)]
+        initiator_nat_type: String,
+    },
+    PunchStart {
+        peer_addr: String,
+        peer_device_id: String,
+        peer_nat_type: String,
     },
     RelayedMessage {
         from_device_id: String,
@@ -141,6 +157,7 @@ pub struct SignalClient {
     device_id: String,
     instance_name: Arc<RwLock<String>>,
     transfer_addr: Arc<RwLock<String>>,
+    nat_type: Arc<RwLock<String>>,
     server_addr: String,
     local_transfer_port: u16,
     status: Arc<RwLock<SignalStatus>>,
@@ -167,6 +184,7 @@ impl SignalClient {
             device_id,
             instance_name: Arc::new(RwLock::new(instance_name)),
             transfer_addr: Arc::new(RwLock::new(transfer_addr)),
+            nat_type: Arc::new(RwLock::new(String::new())),
             server_addr,
             local_transfer_port,
             status: Arc::new(RwLock::new(SignalStatus::Disconnected)),
@@ -192,10 +210,12 @@ impl SignalClient {
 
         let instance_name = self.instance_name.read().await.clone();
         let transfer_addr = self.transfer_addr.read().await.clone();
+        let nat_type = self.nat_type.read().await.clone();
         let register_msg = encode_c2s(&C2sMsg::Register {
             device_id: self.device_id.clone(),
             instance_name,
             transfer_addr,
+            nat_type,
         })?;
         write_half.write_all(&register_msg).await?;
 
@@ -275,10 +295,18 @@ impl SignalClient {
         result.map_err(|e| anyhow::anyhow!(e))
     }
 
+    pub async fn update_nat_type(&self, nat_type: String) {
+        *self.nat_type.write().await = nat_type;
+    }
+
     pub async fn request_punch(&self, target_device_id: String) -> Result<String> {
         let (tx, rx) = oneshot::channel();
         self.pending_punch.write().await.insert(target_device_id.clone(), tx);
-        self.send_msg(&C2sMsg::RequestPunch { target_device_id: target_device_id.clone() }).await?;
+        let nat_type = self.nat_type.read().await.clone();
+        self.send_msg(&C2sMsg::RequestPunch {
+            target_device_id: target_device_id.clone(),
+            nat_type,
+        }).await?;
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .map_err(|_| {
@@ -287,6 +315,10 @@ impl SignalClient {
             })?
             .map_err(|_| anyhow::anyhow!("通道关闭"))?;
         Ok(result)
+    }
+
+    pub async fn send_punch_ready(&self, target_device_id: String) -> Result<()> {
+        self.send_msg(&C2sMsg::PunchReady { target_device_id }).await
     }
 
     pub async fn send_relay_message(&self, to: &str, content: String, timestamp: u64) -> Result<()> {
@@ -413,14 +445,27 @@ impl SignalClient {
                     }
                 }
             }
-            S2cMsg::PunchCoordinate { peer_addr, peer_device_id } => {
+            S2cMsg::PunchCoordinate { peer_addr, peer_device_id, peer_nat_type: _ } => {
                 let tx = self.pending_punch.write().await.remove(&peer_device_id);
                 if let Some(tx) = tx {
                     let _ = tx.send(peer_addr);
                 }
+                let _ = self.send_msg(&C2sMsg::PunchReady {
+                    target_device_id: peer_device_id,
+                }).await;
             }
-            S2cMsg::PunchRequest { initiator_device_id: _, initiator_addr } => {
+            S2cMsg::PunchRequest { initiator_device_id, initiator_addr, initiator_nat_type: _ } => {
                 if let Ok(addr) = initiator_addr.parse::<std::net::SocketAddr>() {
+                    if let Some(handler) = self.punch_handler.read().await.as_ref() {
+                        handler(addr);
+                    }
+                }
+                let _ = self.send_msg(&C2sMsg::PunchReady {
+                    target_device_id: initiator_device_id,
+                }).await;
+            }
+            S2cMsg::PunchStart { peer_addr, peer_device_id: _, peer_nat_type: _ } => {
+                if let Ok(addr) = peer_addr.parse::<std::net::SocketAddr>() {
                     if let Some(handler) = self.punch_handler.read().await.as_ref() {
                         handler(addr);
                     }

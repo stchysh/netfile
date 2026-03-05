@@ -12,7 +12,20 @@ use crate::protocol::{read_c2s, write_s2c, C2sMsg, FriendInfo, OfflineMsg, S2cMs
 struct OnlineEntry {
     instance_name: String,
     transfer_addr: String,
+    nat_type: String,
     tx: mpsc::Sender<S2cMsg>,
+}
+
+struct PunchSession {
+    initiator_id: String,
+    target_id: String,
+    initiator_addr: String,
+    target_addr: String,
+    initiator_nat_type: String,
+    target_nat_type: String,
+    initiator_ready: bool,
+    target_ready: bool,
+    created_at: Instant,
 }
 
 struct InviteEntry {
@@ -26,6 +39,7 @@ pub struct ServerState {
     invite_codes: RwLock<HashMap<String, InviteEntry>>,
     offline_msgs: RwLock<HashMap<String, Vec<OfflineMsg>>>,
     relay_sessions: RwLock<HashMap<String, mpsc::Sender<TcpStream>>>,
+    punch_sessions: RwLock<HashMap<String, PunchSession>>,
     pub relay_port: Option<u16>,
 }
 
@@ -37,15 +51,22 @@ impl ServerState {
             invite_codes: RwLock::new(HashMap::new()),
             offline_msgs: RwLock::new(HashMap::new()),
             relay_sessions: RwLock::new(HashMap::new()),
+            punch_sessions: RwLock::new(HashMap::new()),
             relay_port,
         })
+    }
+
+    fn punch_key(a: &str, b: &str) -> String {
+        let mut pair = [a, b];
+        pair.sort();
+        format!("{}:{}", pair[0], pair[1])
     }
 }
 
 pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
-    let (device_id, instance_name, transfer_addr) = match read_c2s(&mut stream).await {
-        Ok(C2sMsg::Register { device_id, instance_name, transfer_addr }) => {
-            (device_id, instance_name, transfer_addr)
+    let (device_id, instance_name, transfer_addr, nat_type) = match read_c2s(&mut stream).await {
+        Ok(C2sMsg::Register { device_id, instance_name, transfer_addr, nat_type }) => {
+            (device_id, instance_name, transfer_addr, nat_type)
         }
         Ok(other) => {
             warn!("First message is not Register: {:?}", other);
@@ -111,6 +132,7 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
         online_map.insert(device_id.clone(), OnlineEntry {
             instance_name: instance_name.clone(),
             transfer_addr: transfer_addr.clone(),
+            nat_type: nat_type.clone(),
             tx: tx.clone(),
         });
     }
@@ -281,8 +303,8 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                     }
                 }
             }
-            C2sMsg::RequestPunch { target_device_id } => {
-                debug!("[{}] request punch to [{}]", device_id, target_device_id);
+            C2sMsg::RequestPunch { target_device_id, nat_type: initiator_nat } => {
+                debug!("[{}] request punch to [{}], nat_type={}", device_id, target_device_id, initiator_nat);
                 let online_map = state.online.read().await;
                 match online_map.get(&target_device_id) {
                     None => {
@@ -290,18 +312,81 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                         let _ = tx.send(S2cMsg::Error { message: "目标设备不在线".to_string() }).await;
                     }
                     Some(target) => {
-                        let target_addr = target.transfer_addr.clone();
-                        info!("[{}] punch: sending coordinate addr={} to initiator, request to target [{}]",
-                            device_id, target_addr, target_device_id);
+                        let target_transfer_addr = target.transfer_addr.clone();
+                        let target_nat = target.nat_type.clone();
+                        let target_tx = target.tx.clone();
+                        drop(online_map);
+
+                        info!("[{}] punch: initiator_nat={}, target_nat={}, target_addr={}",
+                            device_id, initiator_nat, target_nat, target_transfer_addr);
+
                         let _ = tx.send(S2cMsg::PunchCoordinate {
-                            peer_addr: target_addr.clone(),
+                            peer_addr: target_transfer_addr.clone(),
                             peer_device_id: target_device_id.clone(),
+                            peer_nat_type: target_nat.clone(),
                         }).await;
-                        let _ = target.tx.try_send(S2cMsg::PunchRequest {
+                        let _ = target_tx.try_send(S2cMsg::PunchRequest {
                             initiator_device_id: device_id.clone(),
                             initiator_addr: transfer_addr.clone(),
+                            initiator_nat_type: initiator_nat.clone(),
+                        });
+
+                        let key = ServerState::punch_key(&device_id, &target_device_id);
+                        let mut sessions = state.punch_sessions.write().await;
+                        sessions.insert(key, PunchSession {
+                            initiator_id: device_id.clone(),
+                            target_id: target_device_id.clone(),
+                            initiator_addr: transfer_addr.clone(),
+                            target_addr: target_transfer_addr,
+                            initiator_nat_type: initiator_nat,
+                            target_nat_type: target_nat,
+                            initiator_ready: false,
+                            target_ready: false,
+                            created_at: Instant::now(),
                         });
                     }
+                }
+            }
+            C2sMsg::PunchReady { target_device_id } => {
+                let key = ServerState::punch_key(&device_id, &target_device_id);
+                let mut sessions = state.punch_sessions.write().await;
+                if let Some(session) = sessions.get_mut(&key) {
+                    if session.created_at.elapsed() > Duration::from_secs(15) {
+                        debug!("[{}] punch session expired for [{}]", device_id, target_device_id);
+                        sessions.remove(&key);
+                        continue;
+                    }
+                    if device_id == session.initiator_id {
+                        session.initiator_ready = true;
+                    } else {
+                        session.target_ready = true;
+                    }
+
+                    if session.initiator_ready && session.target_ready {
+                        let session = sessions.remove(&key).unwrap();
+                        drop(sessions);
+                        info!("[{}] punch: both sides ready, sending PunchStart", device_id);
+
+                        let online_map = state.online.read().await;
+                        if let Some(initiator) = online_map.get(&session.initiator_id) {
+                            let _ = initiator.tx.try_send(S2cMsg::PunchStart {
+                                peer_addr: session.target_addr.clone(),
+                                peer_device_id: session.target_id.clone(),
+                                peer_nat_type: session.target_nat_type.clone(),
+                            });
+                        }
+                        if let Some(target) = online_map.get(&session.target_id) {
+                            let _ = target.tx.try_send(S2cMsg::PunchStart {
+                                peer_addr: session.initiator_addr.clone(),
+                                peer_device_id: session.initiator_id.clone(),
+                                peer_nat_type: session.initiator_nat_type.clone(),
+                            });
+                        }
+                    } else {
+                        debug!("[{}] punch ready, waiting for peer [{}]", device_id, target_device_id);
+                    }
+                } else {
+                    debug!("[{}] no punch session found for [{}]", device_id, target_device_id);
                 }
             }
             C2sMsg::RelayMessage { to_device_id, content, timestamp } => {

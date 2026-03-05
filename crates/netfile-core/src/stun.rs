@@ -13,6 +13,7 @@ impl StunClient {
         Self {
             stun_servers: vec![
                 "stun.cloudflare.com:3478".to_string(),
+                "stun.miwifi.com:3478".to_string(),
                 "stun.l.google.com:19302".to_string(),
                 "stun1.l.google.com:19302".to_string(),
                 "stun2.l.google.com:19302".to_string(),
@@ -106,19 +107,42 @@ impl StunClient {
         Ok(public_addr)
     }
 
-    pub async fn detect_nat_type(&self) -> Result<NatType> {
-        let public_addr = self.get_public_address().await?;
-
-        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-        let local_addr = socket.local_addr()?;
-
-        if public_addr.ip() == local_addr.ip() {
-            info!("NAT type: No NAT (public IP)");
-            return Ok(NatType::NoNat);
+    pub async fn detect_nat_type_with_socket(&self, socket: &tokio::net::UdpSocket) -> Result<NatType> {
+        if self.stun_servers.len() < 2 {
+            return Err(anyhow::anyhow!("Need at least 2 STUN servers for NAT type detection"));
         }
 
-        info!("NAT type: Behind NAT");
-        Ok(NatType::SymmetricNat)
+        let addr1 = Self::query_with_socket(socket, &self.stun_servers[0]).await;
+        let addr2 = Self::query_with_socket(socket, &self.stun_servers[1]).await;
+
+        match (addr1, addr2) {
+            (Ok(a1), Ok(a2)) => {
+                let local_addr = socket.local_addr()?;
+                if a1.ip() == local_addr.ip() {
+                    info!("NAT type: NoNat (public IP)");
+                    return Ok(NatType::NoNat);
+                }
+                if a1.port() == a2.port() {
+                    info!("NAT type: ConeNat (port {} consistent across servers {} and {})",
+                        a1.port(), self.stun_servers[0], self.stun_servers[1]);
+                    Ok(NatType::ConeNat)
+                } else {
+                    info!("NAT type: SymmetricNat (port {} vs {} from servers {} and {})",
+                        a1.port(), a2.port(), self.stun_servers[0], self.stun_servers[1]);
+                    Ok(NatType::SymmetricNat)
+                }
+            }
+            (Ok(a1), Err(_)) => {
+                let local_addr = socket.local_addr()?;
+                if a1.ip() == local_addr.ip() {
+                    Ok(NatType::NoNat)
+                } else {
+                    warn!("Only one STUN server responded, assuming ConeNat");
+                    Ok(NatType::ConeNat)
+                }
+            }
+            _ => Err(anyhow::anyhow!("Failed to query STUN servers for NAT detection")),
+        }
     }
 }
 
@@ -131,10 +155,31 @@ impl Default for StunClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NatType {
     NoNat,
-    FullCone,
-    RestrictedCone,
-    PortRestrictedCone,
+    ConeNat,
     SymmetricNat,
+}
+
+impl NatType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NatType::NoNat => "no_nat",
+            NatType::ConeNat => "cone",
+            NatType::SymmetricNat => "symmetric",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "no_nat" => NatType::NoNat,
+            "cone" => NatType::ConeNat,
+            "symmetric" => NatType::SymmetricNat,
+            _ => NatType::SymmetricNat,
+        }
+    }
+
+    pub fn is_punchable(&self) -> bool {
+        matches!(self, NatType::NoNat | NatType::ConeNat)
+    }
 }
 
 #[cfg(test)]

@@ -74,6 +74,8 @@ pub struct TransferService {
     quic_endpoint: Arc<quinn::Endpoint>,
     transfer_port: u16,
     public_addr: Option<String>,
+    nat_type: Arc<RwLock<crate::stun::NatType>>,
+    connection_cache: Arc<RwLock<HashMap<SocketAddr, quinn::Connection>>>,
     task_queue: Arc<TaskQueue>,
     progress_tracker: Arc<ProgressTracker>,
     cancelled: Arc<RwLock<HashSet<String>>>,
@@ -122,9 +124,11 @@ impl TransferService {
         std_socket.set_nonblocking(true)?;
         let tokio_socket = tokio::net::UdpSocket::from_std(std_socket)?;
 
+        let stun_client = crate::stun::StunClient::new();
+
         let public_addr = match tokio::time::timeout(
             Duration::from_secs(5),
-            crate::stun::StunClient::new().get_public_address_with_socket(&tokio_socket),
+            stun_client.get_public_address_with_socket(&tokio_socket),
         ).await {
             Ok(Ok(addr)) => {
                 info!("STUN discovered public address for QUIC endpoint: {}", addr);
@@ -137,6 +141,24 @@ impl TransferService {
             Err(_) => {
                 warn!("STUN query for QUIC endpoint timed out");
                 None
+            }
+        };
+
+        let nat_type = match tokio::time::timeout(
+            Duration::from_secs(8),
+            stun_client.detect_nat_type_with_socket(&tokio_socket),
+        ).await {
+            Ok(Ok(nt)) => {
+                info!("NAT type detected: {:?}", nt);
+                nt
+            }
+            Ok(Err(e)) => {
+                warn!("NAT type detection failed: {}, assuming ConeNat", e);
+                crate::stun::NatType::ConeNat
+            }
+            Err(_) => {
+                warn!("NAT type detection timed out, assuming ConeNat");
+                crate::stun::NatType::ConeNat
             }
         };
 
@@ -153,6 +175,8 @@ impl TransferService {
             quic_endpoint: Arc::new(quic_endpoint),
             transfer_port: port,
             public_addr,
+            nat_type: Arc::new(RwLock::new(nat_type)),
+            connection_cache: Arc::new(RwLock::new(HashMap::new())),
             task_queue: Arc::new(TaskQueue::new(max_concurrent)),
             progress_tracker: Arc::new(ProgressTracker::new()),
             cancelled: Arc::new(RwLock::new(HashSet::new())),
@@ -873,8 +897,8 @@ impl TransferService {
                 connecting,
             ).await {
                 Ok(Ok(conn)) => {
-                    info!("QUIC punch hole succeeded to {}", peer_addr);
-                    conn.close(0u32.into(), b"");
+                    info!("QUIC punch hole succeeded to {}, caching connection", peer_addr);
+                    self.connection_cache.write().await.insert(peer_addr, conn);
                 }
                 Ok(Err(e)) => {
                     debug!("QUIC punch hole failed to {}: {}", peer_addr, e);
@@ -884,6 +908,34 @@ impl TransferService {
                 }
             }
         }
+    }
+
+    pub fn nat_type_blocking(&self) -> crate::stun::NatType {
+        *self.nat_type.blocking_read()
+    }
+
+    async fn get_or_connect(&self, target_addr: SocketAddr) -> Result<quinn::Connection> {
+        {
+            let cache = self.connection_cache.read().await;
+            if let Some(conn) = cache.get(&target_addr) {
+                if conn.close_reason().is_none() {
+                    debug!("Reusing cached QUIC connection to {}", target_addr);
+                    return Ok(conn.clone());
+                }
+            }
+        }
+        self.connection_cache.write().await.remove(&target_addr);
+
+        let conn = match self.quic_endpoint.connect(target_addr, "netfile") {
+            Ok(c) => match tokio::time::timeout(std::time::Duration::from_secs(3), c).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => return Err(anyhow::anyhow!("QUIC connection timed out")),
+            },
+            Err(e) => return Err(e.into()),
+        };
+        self.connection_cache.write().await.insert(target_addr, conn.clone());
+        Ok(conn)
     }
 
     async fn do_send_file(
@@ -935,21 +987,11 @@ impl TransferService {
             password_hash: None,
         };
 
-        let conn = match self.quic_endpoint.connect(target_addr, "netfile") {
-            Ok(c) => match tokio::time::timeout(std::time::Duration::from_secs(3), c).await {
-                Ok(Ok(c)) => c,
-                Ok(Err(e)) => {
-                    self.progress_tracker.remove_progress(&file_id).await;
-                    return Err(e.into());
-                }
-                Err(_) => {
-                    self.progress_tracker.remove_progress(&file_id).await;
-                    return Err(anyhow::anyhow!("QUIC connection timed out"));
-                }
-            },
+        let conn = match self.get_or_connect(target_addr).await {
+            Ok(c) => c,
             Err(e) => {
-                self.progress_tracker.set_error(&file_id, format!("QUIC connection failed: {}", e)).await;
-                return Err(e.into());
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
             }
         };
 
@@ -1137,7 +1179,7 @@ impl TransferService {
             password_hash: None,
         };
 
-        let conn = self.quic_endpoint.connect(target_addr, "netfile")?.await?;
+        let conn = self.get_or_connect(target_addr).await?;
         let (mut send, mut recv) = conn.open_bi().await?;
 
         Self::write_msg(&mut send, &Message::TransferRequest(request)).await?;
@@ -1259,13 +1301,9 @@ impl TransferService {
             timestamp,
         };
 
-        let conn = match self.quic_endpoint.connect(target_addr, "netfile") {
-            Ok(c) => match tokio::time::timeout(Duration::from_secs(3), c).await {
-                Ok(Ok(c)) => c,
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => return Err(anyhow::anyhow!("QUIC connection timed out")),
-            },
-            Err(e) => return Err(e.into()),
+        let conn = match self.get_or_connect(target_addr).await {
+            Ok(c) => c,
+            Err(e) => return Err(e),
         };
         let (mut send, mut recv) = conn.open_bi().await?;
         Self::write_msg(&mut send, &Message::TextMessage(msg)).await?;
@@ -1526,6 +1564,10 @@ impl TransferService {
         self.public_addr.as_deref()
     }
 
+    pub fn nat_type_str(&self) -> String {
+        self.nat_type.blocking_read().as_str().to_string()
+    }
+
     pub fn task_queue(&self) -> Arc<TaskQueue> {
         self.task_queue.clone()
     }
@@ -1546,6 +1588,8 @@ impl Clone for TransferService {
             quic_endpoint: self.quic_endpoint.clone(),
             transfer_port: self.transfer_port,
             public_addr: self.public_addr.clone(),
+            nat_type: self.nat_type.clone(),
+            connection_cache: self.connection_cache.clone(),
             task_queue: self.task_queue.clone(),
             progress_tracker: self.progress_tracker.clone(),
             cancelled: self.cancelled.clone(),

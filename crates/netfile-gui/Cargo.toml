@@ -21,6 +21,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 dirs = "5.0"
+rustls.workspace = true
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

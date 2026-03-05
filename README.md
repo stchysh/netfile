@@ -1,6 +1,6 @@
 # NetFile
 
-NetFile 是一个高性能的内网文件传输工具，支持设备发现、文件传输、断点续传、压缩传输、TLS 加密、NAT 穿透等功能。
+NetFile 是一个高性能的局域网/跨NAT文件传输工具，支持设备发现、文件传输、断点续传、压缩传输、TLS 加密、NAT 穿透、信令服务器好友系统等功能。
 
 ## 核心特性
 
@@ -11,6 +11,7 @@ NetFile 是一个高性能的内网文件传输工具，支持设备发现、文
 - **压缩传输**: 使用 zstd 算法智能压缩，自动判断压缩收益
 - **安全机制**: 支持设备授权、密码保护和 TLS 加密
 - **NAT 穿透**: 支持 STUN 协议获取公网 IP 和 UDP 打洞
+- **信令服务器**: 跨 NAT 的好友系统、邀请码配对、消息中继
 - **跨平台**: 支持 Windows、Linux、macOS
 
 ## 架构设计
@@ -21,20 +22,25 @@ NetFile 是一个高性能的内网文件传输工具，支持设备发现、文
 netfile/
 ├── crates/
 │   ├── netfile-core/          # 核心库
-│   │   ├── src/
-│   │   │   ├── config.rs      # 配置管理
-│   │   │   ├── discovery/     # 设备发现
-│   │   │   ├── transfer/      # 文件传输
-│   │   │   ├── protocol.rs    # 协议定义
-│   │   │   ├── auth.rs        # 身份验证
-│   │   │   ├── compression.rs # 压缩模块
-│   │   │   ├── tls.rs         # TLS 加密
-│   │   │   ├── stun.rs        # STUN 协议
-│   │   │   └── hole_punch.rs  # UDP 打洞
-│   │   └── tests/             # 集成测试
+│   │   └── src/
+│   │       ├── config.rs      # 配置管理
+│   │       ├── discovery/     # 设备发现
+│   │       ├── transfer/      # 文件传输
+│   │       ├── protocol.rs    # 协议定义
+│   │       ├── auth.rs        # 身份验证
+│   │       ├── compression.rs # 压缩模块
+│   │       ├── tls.rs         # TLS 加密
+│   │       ├── stun.rs        # STUN 协议
+│   │       ├── hole_punch.rs  # UDP 打洞
+│   │       ├── message_store.rs # 消息持久化
+│   │       └── signal_client.rs # 信令客户端
+│   ├── netfile-signal/        # 信令服务器（独立部署）
+│   │   └── src/
+│   │       ├── main.rs        # 服务入口 --host/--port
+│   │       ├── protocol.rs    # 信令协议（JSON over TCP）
+│   │       └── server.rs      # ServerState + handle_connection
+│   ├── netfile-gui/           # Tauri GUI 客户端
 │   └── netfile-cli/           # CLI 工具
-│       └── src/
-│           └── main.rs        # 命令行入口
 └── docs/                      # 文档目录
 ```
 
@@ -45,8 +51,7 @@ netfile/
 使用 UDP 广播实现局域网设备自动发现：
 - 定时广播设备信息（默认 5 秒间隔）
 - 监听其他设备的广播消息
-- 维护在线设备列表
-- 支持心跳超时检测
+- 维护在线设备列表，支持心跳超时检测
 
 #### 2. 文件传输 (Transfer)
 
@@ -56,50 +61,67 @@ netfile/
 - **并发控制**: 支持多个文件并发传输（默认最多 3 个）
 - **完整性校验**: 使用 SHA256 校验文件完整性，CRC32 校验块完整性
 
-#### 3. 协议设计
+#### 3. 信令服务器 (Signal Server)
 
-使用 bincode 序列化的二进制协议：
+独立部署的信令服务器，提供跨 NAT 通信能力。协议为 JSON over TCP，每条消息使用 4 字节大端 length prefix 分帧。
 
-```rust
-// 传输请求
-TransferRequest {
-    file_id: String,
-    file_name: String,
-    relative_path: Option<String>,
-    file_size: u64,
-    file_hash: [u8; 32],
-    chunk_size: u32,
-    device_id: String,
-    password_hash: Option<String>,
-}
+**服务端状态：**
+- `online`: 当前在线设备表（device_id → 连接信息）
+- `friends`: 好友关系表（双向 HashSet）
+- `invite_codes`: 邀请码表（8 位大写字母，10 分钟 TTL）
+- `offline_msgs`: 离线消息队列（每设备最多 200 条）
 
-// 块数据
-ChunkData {
-    file_id: String,
-    chunk_index: u32,
-    data: Vec<u8>,
-    checksum: u32,
-    compressed: bool,
-}
+**好友生命周期：**
+1. 设备连接后发送 `Register`，服务端推送 `Registered{friends}` 和离线消息
+2. 设备上线/下线时服务端向其好友广播 `FriendOnline` / `FriendOffline`
+3. 设备断连后从 `online` 表移除，好友关系保留在 `friends` 表（内存）
+
+**邀请码配对流程：**
+1. 设备 A 发送 `GenerateInvite`，服务端返回 8 位邀请码
+2. 设备 B 发送 `AcceptInvite{code}`，服务端建立双向好友关系
+3. 双方收到 `InviteResult`，如果对方在线同时收到 `FriendOnline`
+
+**NAT 打洞协调：**
+1. 设备 A 发送 `RequestPunch{target_device_id}`
+2. 服务端向 A 返回 `PunchCoordinate{peer_addr}`，向 B 发送 `PunchRequest{initiator_addr}`
+3. 双方各自向对端发起 TCP 连接建立直连
+
+**消息中继：**
+- 目标在线时：服务端实时转发 `RelayedMessage`
+- 目标离线时：消息入队 `offline_msgs`，对方上线后批量推送
+
+#### 4. 信令客户端 (SignalClient)
+
+`netfile-core/src/signal_client.rs` 中的 `SignalClient`：
+- 维护到信令服务器的单一 TCP 长连接，reader/writer 独立 task
+- 通过 oneshot channel 实现 `generate_invite` / `accept_invite` / `request_punch` 的 async 等待
+- reader loop 直接更新 `friends: Arc<RwLock<Vec<FriendInfo>>>`
+- 收到 `RelayedMessage` / `OfflineMessages` 时写入 `MessageStore`
+
+#### 5. 协议设计
+
+传输协议使用 bincode 序列化的二进制协议；信令协议使用 JSON：
+
+```json
+// C2S
+{"type":"register","device_id":"...","instance_name":"...","transfer_addr":"1.2.3.4:37050"}
+{"type":"generate_invite"}
+{"type":"accept_invite","code":"ABCD1234"}
+{"type":"request_punch","target_device_id":"..."}
+{"type":"relay_message","to_device_id":"...","content":"...","timestamp":1234567890}
+{"type":"heartbeat"}
+
+// S2C
+{"type":"registered","friends":[...]}
+{"type":"invite_code","code":"ABCD1234"}
+{"type":"invite_result","success":true,"friend":{...},"error":null}
+{"type":"friend_online","device_id":"...","instance_name":"...","transfer_addr":"..."}
+{"type":"friend_offline","device_id":"..."}
+{"type":"punch_coordinate","peer_addr":"...","peer_device_id":"..."}
+{"type":"punch_request","initiator_device_id":"...","initiator_addr":"..."}
+{"type":"relayed_message","from_device_id":"...","from_instance_name":"...","content":"...","timestamp":...}
+{"type":"offline_messages","messages":[...]}
 ```
-
-#### 4. 压缩传输
-
-使用 zstd 算法（压缩级别 3）：
-- 仅对大于 1024 字节的块进行压缩
-- 自动判断压缩收益，无收益则跳过
-- 接收端自动检测并解压
-
-#### 5. 安全机制
-
-- **设备授权**: 维护授权设备白名单
-- **密码保护**: 使用 SHA256 哈希存储密码
-- **TLS 加密**: 支持自签名证书的 TLS 加密传输
-
-#### 6. NAT 穿透
-
-- **STUN 协议**: 获取公网 IP 地址和端口映射
-- **UDP 打洞**: 实现 P2P 连接建立
 
 ## 配置文件
 
@@ -112,12 +134,13 @@ instance_name = "默认实例"
 device_name = "hostname"
 
 [network]
-discovery_port = 0        # 0 表示自动分配
+discovery_port = 0          # 0 表示自动分配
 transfer_port = 0
-broadcast_interval = 5    # 秒
+broadcast_interval = 5      # 秒
+signal_server_addr = ""     # 信令服务器地址，格式 host:port，空字符串表示不使用
 
 [transfer]
-chunk_size = 1048576      # 1MB
+chunk_size = 1048576        # 1MB
 max_concurrent = 3
 enable_compression = false
 
@@ -128,93 +151,70 @@ allowed_devices = []
 enable_tls = false
 ```
 
-## CLI 命令
+## 信令服务器部署与使用
 
-### 启动服务
+### 部署服务端
 
 ```bash
-# 启动 CLI 模式
-netfile
+# 编译
+cargo build --release --package netfile-signal
 
-# 指定实例名称
-netfile --name Server1
+# 运行（默认监听 0.0.0.0:37200）
+./target/release/netfile-signal
 
-# 指定配置文件
-netfile --config /path/to/config.toml
+# 自定义地址和端口
+./target/release/netfile-signal --host 0.0.0.0 --port 37200
 ```
 
-### 设备管理
+服务端为纯内存状态，重启后好友关系和离线消息清空。
 
-```bash
-# 列出在线设备
-netfile devices list
+### 客户端连接信令服务器
 
-# 查看设备详情
-netfile devices info <instance_id>
+**方式一：通过 GUI 设置界面**
+
+1. 打开设置（右上角齿轮图标）
+2. 在「网络配置」→「信令服务器地址」输入框中填写 `host:37200`
+3. 点击「连接」按钮，状态变为「已连接」即成功
+4. 点击「保存」后地址会写入配置文件，下次启动自动重连
+
+**方式二：直接编辑配置文件**
+
+在 `~/.netfile/config.toml` 中设置：
+```toml
+[network]
+signal_server_addr = "your-server-ip:37200"
 ```
+重启客户端后自动连接。
 
-### 文件传输
+### 添加好友（邀请码配对）
 
-```bash
-# 发送文件
-netfile send <target_ip:port> <file_path>
+双方都连接到同一信令服务器后：
 
-# 发送文件夹（递归）
-netfile send <target_ip:port> <folder_path> --recursive
-```
+1. 一方点击设备列表底部「邀请好友」按钮，切换到「生成邀请码」tab，获得 8 位邀请码
+2. 将邀请码告知对方（任意渠道）
+3. 对方切换到「输入邀请码」tab，输入邀请码并点击「确认」
+4. 配对成功，双方设备列表的「网络好友」区块出现对方，标注 `WAN` 徽标
+5. 邀请码有效期 10 分钟，过期后需重新生成
 
-### 传输管理
+### 跨 NAT 通信流程
 
-```bash
-# 列出传输任务
-netfile transfers list
+**文字消息：**
+- 优先尝试直连 TCP（使用 STUN 检测到的公网 transfer_addr）
+- 直连失败时自动回退到信令服务器中继
 
-# 查看传输详情
-netfile transfers info <task_id>
-```
+**文件传输：**
+- 通过信令服务器交换双方公网 transfer_addr
+- 发起 TCP 直连，成功后走 P2P 传输
 
-### 配置管理
+### FriendInfo 数据结构
 
-```bash
-# 显示配置
-netfile config show
-
-# 设置配置项
-netfile config set transfer.enable_compression true
-
-# 重置配置
-netfile config reset
-```
-
-### 授权管理
-
-```bash
-# 列出授权设备
-netfile auth list
-
-# 添加授权设备
-netfile auth allow <device_id>
-
-# 移除授权设备
-netfile auth deny <device_id>
-
-# 设置密码
-netfile auth set-password <password>
-```
-
-### 输出格式
-
-所有命令支持三种输出格式：
-
-```bash
-# 表格格式（默认）
-netfile devices list -o table
-
-# JSON 格式
-netfile devices list -o json
-
-# 简洁格式
-netfile devices list -o simple
+```rust
+pub struct FriendInfo {
+    pub device_id: String,      // 对端 instance_id（持久唯一）
+    pub instance_name: String,  // 显示名称
+    pub online: bool,           // 当前是否在线
+    pub transfer_addr: Option<String>,  // 公网 transfer_addr（IP:port），离线时为 None
+}
 ```
 
 ## 数据流程
@@ -230,75 +230,57 @@ netfile devices list -o simple
 7. 等待每个块的 ChunkAck 确认
 8. 完成后发送 TransferComplete
 
-### 文件接收流程
+### 文字消息发送流程
 
-1. 监听 TCP 连接
-2. 接收 TransferRequest
-3. 创建临时文件（预分配空间）
-4. 发送 TransferResponse 确认
-5. 接收 ChunkData 并写入临时文件
-6. 发送 ChunkAck 确认
-7. 所有块接收完成后校验文件哈希
-8. 将临时文件移动到目标位置
-
-## 性能特性
-
-- **零拷贝**: 使用流式读写减少内存拷贝
-- **并发传输**: 支持多文件并发传输
-- **智能压缩**: 自动判断压缩收益
-- **断点续传**: 支持中断后继续传输
-- **进度跟踪**: 实时显示传输进度和速度
-
-## 测试
-
-项目包含完整的单元测试和集成测试：
-
-```bash
-# 运行所有测试
-cargo test
-
-# 运行单元测试
-cargo test --lib
-
-# 运行集成测试
-cargo test --test integration_test
+```
+send_text_message(peer_instance_id, target_addr, content)
+  ├─ 尝试 TCP 直连 transfer_addr
+  │   ├─ 成功 → 发送 TextMessage，存入 MessageStore（is_self=true）
+  │   └─ 失败 → SignalClient.send_relay_message(peer_instance_id, content, ts)
+  │               └─ 服务端转发或存入离线队列
+  └─ 对端收到后存入 MessageStore（is_self=false）
 ```
 
-测试覆盖：
-- 配置模块：默认值、序列化、ID 生成
-- 协议模块：消息序列化、反序列化
-- 压缩模块：压缩/解压、边界情况
-- 认证模块：密码哈希、设备授权
-- 传输模块：服务创建、进度跟踪
+## Tauri 命令（GUI ↔ Rust）
+
+| 命令 | 说明 |
+|------|------|
+| `connect_signal_server(server_addr)` | 连接信令服务器 |
+| `disconnect_signal_server()` | 断开信令服务器 |
+| `get_signal_status()` → `{connected: bool}` | 获取连接状态 |
+| `generate_invite_code()` → `String` | 生成邀请码 |
+| `accept_invite_code(code)` → `FriendInfo` | 接受邀请码 |
+| `get_signal_friends()` → `FriendInfo[]` | 获取好友列表 |
+| `send_relay_message(to_device_id, content)` | 发送中继消息 |
 
 ## 技术栈
 
 - **语言**: Rust 2021 Edition
 - **异步运行时**: Tokio
-- **序列化**: Serde, Bincode, TOML
+- **序列化**: Serde, Bincode, TOML, JSON
 - **网络**: Tokio TCP/UDP
 - **加密**: SHA256, Rustls, RCGen
 - **压缩**: Zstd
 - **NAT 穿透**: STUN
 - **CLI**: Clap
 - **日志**: Tracing
+- **GUI**: Tauri + React + TypeScript
 
 ## 开发状态
 
-- ✅ 设备发现
-- ✅ 文件传输
-- ✅ 断点续传
-- ✅ 文件夹传输
-- ✅ 进度跟踪
-- ✅ 身份验证
-- ✅ TLS 加密
-- ✅ 压缩传输
-- ✅ STUN 协议
-- ✅ UDP 打洞
-- ✅ CLI 命令行
-- ✅ 单元测试
-- ✅ 集成测试
-- ⏳ GUI 界面
+- 设备发现（LAN UDP 广播）
+- 文件传输（TCP，断点续传）
+- 文件夹传输
+- 进度跟踪
+- 身份验证
+- TLS 加密
+- 压缩传输
+- STUN 协议
+- UDP 打洞
+- CLI 命令行
+- GUI 界面（Tauri）
+- 文字消息（LAN 直连 + 信令中继）
+- 信令服务器（好友系统、邀请码、NAT 打洞协调、离线消息）
 
 ## 许可证
 

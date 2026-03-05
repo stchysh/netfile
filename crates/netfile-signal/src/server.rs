@@ -64,6 +64,15 @@ impl ServerState {
 }
 
 pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
+    let peer_addr = match stream.peer_addr() {
+        Ok(addr) => addr,
+        Err(e) => {
+            debug!("Failed to get peer address: {}", e);
+            return;
+        }
+    };
+    let observed_ip = peer_addr.ip().to_string();
+
     let (device_id, instance_name, transfer_addr, nat_type) = match read_c2s(&mut stream).await {
         Ok(C2sMsg::Register { device_id, instance_name, transfer_addr, nat_type }) => {
             (device_id, instance_name, transfer_addr, nat_type)
@@ -78,7 +87,7 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
         }
     };
 
-    info!("[{}] registered, instance_name={:?}, transfer_addr={:?}", device_id, instance_name, transfer_addr);
+    info!("[{}] registered, instance_name={:?}, transfer_addr={:?}, observed_ip={}", device_id, instance_name, transfer_addr, observed_ip);
 
     let offline = {
         let mut store = state.offline_msgs.write().await;
@@ -118,7 +127,7 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
         }
     }
 
-    if write_s2c(&mut stream, &S2cMsg::Registered { friends: online_friends.clone() }).await.is_err() {
+    if write_s2c(&mut stream, &S2cMsg::Registered { friends: online_friends.clone(), observed_addr: observed_ip.clone() }).await.is_err() {
         warn!("[{}] failed to send Registered, disconnecting", device_id);
         return;
     }

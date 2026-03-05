@@ -61,6 +61,8 @@ pub enum C2sMsg {
 pub enum S2cMsg {
     Registered {
         friends: Vec<FriendInfo>,
+        #[serde(default)]
+        observed_addr: String,
     },
     InviteCode {
         code: String,

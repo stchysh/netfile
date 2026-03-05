@@ -1585,9 +1585,16 @@ impl TransferService {
     }
 
     pub async fn refresh_public_addr(&self) -> Result<()> {
+        info!("Starting STUN address refresh...");
         let stun_client = crate::stun::StunClient::new();
 
-        let temp_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        let temp_socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to create UDP socket for STUN: {}", e);
+                return Err(e.into());
+            }
+        };
 
         match tokio::time::timeout(
             Duration::from_secs(5),
@@ -1596,16 +1603,16 @@ impl TransferService {
             Ok(Ok(addr)) => {
                 let public_ip = addr.ip();
                 let addr_str = format!("{}:{}", public_ip, self.transfer_port);
-                info!("STUN refresh: public address updated to {}", addr_str);
+                info!("STUN refresh succeeded: public address = {}", addr_str);
                 *self.public_addr.write().await = Some(addr_str);
                 Ok(())
             }
             Ok(Err(e)) => {
-                warn!("STUN refresh failed: {}", e);
+                error!("STUN refresh failed: {}", e);
                 Err(e)
             }
             Err(_) => {
-                warn!("STUN refresh timed out");
+                error!("STUN refresh timed out after 5 seconds");
                 Err(anyhow::anyhow!("STUN refresh timed out"))
             }
         }

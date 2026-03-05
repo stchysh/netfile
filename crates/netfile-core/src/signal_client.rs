@@ -66,6 +66,8 @@ enum C2sMsg {
 enum S2cMsg {
     Registered {
         friends: Vec<FriendInfo>,
+        #[serde(default)]
+        observed_addr: String,
     },
     InviteCode {
         code: String,
@@ -393,9 +395,19 @@ impl SignalClient {
 
     async fn handle_incoming(self: &Arc<Self>, msg: S2cMsg) {
         match msg {
-            S2cMsg::Registered { friends } => {
+            S2cMsg::Registered { friends, observed_addr } => {
                 *self.friends.write().await = friends;
                 *self.status.write().await = SignalStatus::Connected;
+
+                if !observed_addr.is_empty() {
+                    let current_addr = self.transfer_addr.read().await.clone();
+                    if current_addr.is_empty() {
+                        let fallback_addr = format!("{}:{}", observed_addr, self.local_transfer_port);
+                        tracing::info!("Using observed IP as transfer_addr fallback: {}", fallback_addr);
+                        *self.transfer_addr.write().await = fallback_addr.clone();
+                        let _ = self.send_msg(&C2sMsg::UpdateTransferAddr { transfer_addr: fallback_addr }).await;
+                    }
+                }
             }
             S2cMsg::FriendOnline { device_id, instance_name, transfer_addr } => {
                 let mut friends = self.friends.write().await;

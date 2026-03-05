@@ -12,11 +12,11 @@ impl StunClient {
     pub fn new() -> Self {
         Self {
             stun_servers: vec![
-                "stun.cloudflare.com:3478".to_string(),
                 "stun.miwifi.com:3478".to_string(),
-                "stun.l.google.com:19302".to_string(),
-                "stun1.l.google.com:19302".to_string(),
-                "stun2.l.google.com:19302".to_string(),
+                "stun.cloudflare.com:3478".to_string(),
+                "stun.qq.com:3478".to_string(),
+                "stun.syncthing.net:3478".to_string(),
+                "stun.stunprotocol.org:3478".to_string(),
             ],
         }
     }

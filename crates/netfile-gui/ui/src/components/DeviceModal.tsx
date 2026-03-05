@@ -19,12 +19,18 @@ interface Device {
 interface Props {
   device: Device
   onClose: () => void
+  onChatRead?: () => void
 }
 
 type Tab = 'files' | 'chat'
 
-function DeviceModal({ device, onClose }: Props) {
+function DeviceModal({ device, onClose, onChatRead }: Props) {
   const [tab, setTab] = useState<Tab>('files')
+
+  const handleChatTab = () => {
+    setTab('chat')
+    onChatRead?.()
+  }
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -43,7 +49,7 @@ function DeviceModal({ device, onClose }: Props) {
             </button>
             <button
               className={`tab-button ${tab === 'chat' ? 'active' : ''}`}
-              onClick={() => setTab('chat')}
+              onClick={handleChatTab}
             >
               消息
             </button>

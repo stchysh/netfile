@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,5 +46,31 @@ impl MessageStore {
         let content = tokio::fs::read_to_string(&path).await?;
         let messages: Vec<ChatMessage> = serde_json::from_str(&content)?;
         Ok(messages)
+    }
+
+    pub async fn get_all_counts(&self) -> HashMap<String, usize> {
+        let mut result = HashMap::new();
+        let messages_dir = self.data_dir.join("messages");
+        let mut dir = match tokio::fs::read_dir(&messages_dir).await {
+            Ok(d) => d,
+            Err(_) => return result,
+        };
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let peer_id = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => continue,
+            };
+            if let Ok(data) = tokio::fs::read(&path).await {
+                let count = serde_json::from_slice::<Vec<ChatMessage>>(&data)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                result.insert(peer_id, count);
+            }
+        }
+        result
     }
 }

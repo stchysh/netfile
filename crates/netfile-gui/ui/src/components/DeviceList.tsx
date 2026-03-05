@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import DeviceModal from './DeviceModal'
 import './DeviceList.css'
 
@@ -20,6 +21,7 @@ interface Props {
 }
 
 const STORAGE_KEY = 'netfile-manual-devices'
+const LAST_READ_KEY = 'netfile-last-read-counts'
 
 function loadManualDevices(): Device[] {
   try {
@@ -34,11 +36,66 @@ function saveManualDevices(devices: Device[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(devices))
 }
 
+function loadLastReadCounts(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(LAST_READ_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveLastReadCounts(counts: Record<string, number>) {
+  localStorage.setItem(LAST_READ_KEY, JSON.stringify(counts))
+}
+
 function DeviceList({ devices }: Props) {
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null)
   const [showManualInput, setShowManualInput] = useState(false)
   const [manualAddr, setManualAddr] = useState('')
   const [manualDevices, setManualDevices] = useState<Device[]>(loadManualDevices)
+  const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set())
+
+  const msgCountsRef = useRef<Record<string, number>>({})
+  const lastReadRef = useRef<Record<string, number>>(loadLastReadCounts())
+
+  useEffect(() => {
+    const pollCounts = async () => {
+      try {
+        const counts = await invoke<Record<string, number>>('get_message_counts')
+        msgCountsRef.current = counts
+        const newUnread = new Set<string>()
+        for (const [id, count] of Object.entries(counts)) {
+          if (count > (lastReadRef.current[id] ?? 0)) {
+            newUnread.add(id)
+          }
+        }
+        setUnreadIds(prev => {
+          const prevArr = Array.from(prev).sort().join(',')
+          const nextArr = Array.from(newUnread).sort().join(',')
+          return prevArr === nextArr ? prev : newUnread
+        })
+      } catch {
+        // ignore
+      }
+    }
+    pollCounts()
+    const interval = setInterval(pollCounts, 2000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const markRead = (deviceId: string) => {
+    if (!deviceId) return
+    const current = msgCountsRef.current[deviceId] ?? 0
+    lastReadRef.current[deviceId] = current
+    saveLastReadCounts(lastReadRef.current)
+    setUnreadIds(prev => {
+      if (!prev.has(deviceId)) return prev
+      const next = new Set(prev)
+      next.delete(deviceId)
+      return next
+    })
+  }
 
   const handleCloseSender = () => {
     setSelectedDevice(null)
@@ -106,6 +163,9 @@ function DeviceList({ devices }: Props) {
                       </div>
                     </div>
                   </div>
+                  {!device.is_self && device.device_id && unreadIds.has(device.device_id) && (
+                    <div className="unread-dot"></div>
+                  )}
                 </div>
               ))}
               {manualDevices.map((device) => (
@@ -155,7 +215,11 @@ function DeviceList({ devices }: Props) {
       </div>
 
       {selectedDevice && (
-        <DeviceModal device={selectedDevice} onClose={handleCloseSender} />
+        <DeviceModal
+          device={selectedDevice}
+          onClose={handleCloseSender}
+          onChatRead={() => markRead(selectedDevice.device_id)}
+        />
       )}
     </>
   )

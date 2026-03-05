@@ -1,4 +1,5 @@
 use netfile_core::{ChatMessage, Config, Device, DiscoveryService, HistoryStore, MessageStore, TransferProgress, TransferRecord, TransferService};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Manager, State};
@@ -161,6 +162,11 @@ async fn get_conversation(
 }
 
 #[tauri::command]
+async fn get_message_counts(state: State<'_, AppState>) -> Result<HashMap<String, usize>, String> {
+    Ok(state.message_store.get_all_counts().await)
+}
+
+#[tauri::command]
 async fn get_transfer_history(state: State<'_, AppState>) -> Result<Vec<TransferRecord>, String> {
     Ok(state.history_store.load_history().await)
 }
@@ -245,6 +251,7 @@ pub fn run() {
             reject_transfer,
             send_text_message,
             get_conversation,
+            get_message_counts,
             get_transfer_history,
             clear_transfer_history,
             get_config,

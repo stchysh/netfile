@@ -38,7 +38,7 @@ async fn send_file(
     peer_discovery_addr: Option<String>,
     peer_device_id: Option<String>,
 ) -> Result<(), String> {
-    let addr = target_addr.parse().map_err(|e| format!("无效地址: {}", e))?;
+    let addr = target_addr.parse().ok();
     let path = PathBuf::from(&file_path);
     if !path.exists() {
         return Err(format!("文件不存在: {}", file_path));
@@ -71,10 +71,16 @@ async fn send_file(
         let signal_client = state.signal_client.clone();
         let peer_device_id = peer_device_id.clone();
         tokio::spawn(async move {
-            let result = service
-                .send_folder_with_fallback(path.clone(), addr, fallback_addr, compression)
-                .await;
-            if result.is_err() {
+            let mut direct_ok = false;
+            if let Some(a) = addr {
+                let result = service
+                    .send_folder_with_fallback(path.clone(), a, fallback_addr, compression)
+                    .await;
+                if result.is_ok() {
+                    direct_ok = true;
+                }
+            }
+            if !direct_ok {
                 if let Some(device_id) = peer_device_id.as_deref() {
                     let sc_guard = signal_client.read().await;
                     if let Some(sc) = sc_guard.as_ref() {
@@ -89,33 +95,38 @@ async fn send_file(
                         }
                     }
                 }
-                tracing::error!("Failed to send folder: {}", result.unwrap_err());
+                tracing::error!("Failed to send folder: no valid address and no relay available");
             }
         });
         Ok(())
     } else {
-        let result = state
-            .transfer_service
-            .send_file_with_fallback(path.clone(), addr, fallback_addr, compression)
-            .await;
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                if let Some(device_id) = peer_device_id.as_deref() {
-                    let sc_guard = state.signal_client.read().await;
-                    if let Some(sc) = sc_guard.as_ref() {
-                        if let Ok(relay_addr) = sc.request_relay(device_id).await {
-                            return state
-                                .transfer_service
-                                .send_file_with_fallback(path, relay_addr, None, compression)
-                                .await
-                                .map(|_| ())
-                                .map_err(|e| e.to_string());
-                        }
-                    }
-                }
-                Err(e.to_string())
+        let mut direct_result = None;
+        if let Some(a) = addr {
+            let result = state
+                .transfer_service
+                .send_file_with_fallback(path.clone(), a, fallback_addr, compression)
+                .await;
+            match result {
+                Ok(_) => return Ok(()),
+                Err(e) => direct_result = Some(e),
             }
+        }
+        if let Some(device_id) = peer_device_id.as_deref() {
+            let sc_guard = state.signal_client.read().await;
+            if let Some(sc) = sc_guard.as_ref() {
+                if let Ok(relay_addr) = sc.request_relay(device_id).await {
+                    return state
+                        .transfer_service
+                        .send_file_with_fallback(path, relay_addr, None, compression)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
+                }
+            }
+        }
+        match direct_result {
+            Some(e) => Err(e.to_string()),
+            None => Err("无有效地址且无可用中继".to_string()),
         }
     }
 }
@@ -189,30 +200,47 @@ async fn send_text_message(
     target_addr: String,
     content: String,
 ) -> Result<(), String> {
-    let addr = target_addr.parse().map_err(|e| format!("无效地址: {}", e))?;
+    let addr = target_addr.parse().ok();
     let (from_instance_id, from_instance_name) = {
         let config = state.config.read().await;
         (config.instance.instance_id.clone(), config.instance.instance_name.clone())
     };
 
-    let result = state
-        .transfer_service
-        .send_text_message(&peer_instance_id, addr, content.clone(), from_instance_id, from_instance_name)
-        .await;
+    let mut direct_ok = false;
+    if let Some(a) = addr {
+        let result = state
+            .transfer_service
+            .send_text_message(&peer_instance_id, a, content.clone(), from_instance_id.clone(), from_instance_name.clone())
+            .await;
+        if result.is_ok() {
+            direct_ok = true;
+        }
+    }
 
-    if result.is_err() {
+    if !direct_ok {
         let sc_guard = state.signal_client.read().await;
         if let Some(sc) = sc_guard.as_ref() {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            sc.send_relay_message(&peer_instance_id, content, ts)
+            sc.send_relay_message(&peer_instance_id, content.clone(), ts)
                 .await
                 .map_err(|e| e.to_string())?;
+            if addr.is_none() {
+                let chat_msg = ChatMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    from_instance_id,
+                    from_instance_name,
+                    content,
+                    timestamp: ts,
+                    is_self: true,
+                };
+                let _ = state.message_store.save_message(&peer_instance_id, chat_msg).await;
+            }
             return Ok(());
         }
-        return result.map_err(|e| e.to_string());
+        return Err("无有效地址且无可用中继".to_string());
     }
     Ok(())
 }

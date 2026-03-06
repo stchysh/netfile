@@ -11,6 +11,7 @@ interface TransferRecord {
   error?: string
   timestamp: number
   elapsed_secs: number
+  save_path?: string
 }
 
 function TransferHistory() {
@@ -34,6 +35,28 @@ function TransferHistory() {
     const interval = setInterval(load, 3000)
     return () => clearInterval(interval)
   }, [])
+
+  const handleOpenFile = async (path: string) => {
+    try {
+      await invoke('open_file', { path })
+    } catch (error) {
+      console.error('Failed to open file:', error)
+    }
+  }
+
+  const handleOpenFolder = async (path: string, isFolder: boolean) => {
+    try {
+      if (isFolder) {
+        await invoke('open_folder', { path })
+      } else {
+        const sep = path.includes('\\') ? '\\' : '/'
+        const folderPath = path.substring(0, path.lastIndexOf(sep))
+        await invoke('open_folder', { path: folderPath })
+      }
+    } catch (error) {
+      console.error('Failed to open folder:', error)
+    }
+  }
 
   const handleClear = async () => {
     try {
@@ -103,6 +126,18 @@ function TransferHistory() {
               </div>
               {record.error && (
                 <div className="history-error-msg">{record.error}</div>
+              )}
+              {record.save_path && record.status === 'completed' && (
+                <div className="history-open-actions">
+                  {!record.file_name.endsWith('/') && (
+                    <button className="history-open-btn" onClick={() => handleOpenFile(record.save_path!)}>
+                      打开文件
+                    </button>
+                  )}
+                  <button className="history-open-btn" onClick={() => handleOpenFolder(record.save_path!, record.file_name.endsWith('/'))}>
+                    打开文件夹
+                  </button>
+                </div>
               )}
               <div className="history-item-meta">
                 <span className="history-size">{formatSize(record.file_size)}</span>

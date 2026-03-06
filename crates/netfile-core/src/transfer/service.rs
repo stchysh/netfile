@@ -465,6 +465,7 @@ impl TransferService {
         let _ = self.history_store.add_record(TransferRecord {
             id: Uuid::new_v4().to_string(), file_name: request.file_name.clone(), file_size: request.file_size,
             direction: "receive".to_string(), status: "completed".to_string(), error: None, timestamp: ts, elapsed_secs: elapsed,
+            save_path: Some(download_dir.join(request.relative_path.as_deref().unwrap_or(&request.file_name)).to_string_lossy().to_string()),
         }).await;
         Ok(())
     }
@@ -473,7 +474,7 @@ impl TransferService {
         let chat_msg = ChatMessage {
             id: msg.id.clone(), from_instance_id: msg.from_instance_id.clone(),
             from_instance_name: msg.from_instance_name.clone(), content: msg.content.clone(),
-            timestamp: msg.timestamp, is_self: false,
+            timestamp: msg.timestamp, local_seq: 0, is_self: false,
         };
         self.message_store.save_message(&msg.from_instance_id, chat_msg).await?;
         Self::write_msg_tcp(&mut stream, &Message::TextAck(TextAck { message_id: msg.id })).await?;
@@ -710,6 +711,7 @@ impl TransferService {
             error: None,
             timestamp: ts,
             elapsed_secs: elapsed,
+            save_path: Some(download_dir.join(request.relative_path.as_deref().unwrap_or(&request.file_name)).to_string_lossy().to_string()),
         }).await;
 
         Ok(())
@@ -722,6 +724,7 @@ impl TransferService {
             from_instance_name: msg.from_instance_name.clone(),
             content: msg.content.clone(),
             timestamp: msg.timestamp,
+            local_seq: 0,
             is_self: false,
         };
         self.message_store.save_message(&msg.from_instance_id, chat_msg).await?;
@@ -1150,6 +1153,7 @@ impl TransferService {
             error: None,
             timestamp: ts,
             elapsed_secs: elapsed,
+            save_path: Some(file_path.to_string_lossy().to_string()),
         }).await;
 
         Ok(file_id)
@@ -1296,7 +1300,7 @@ impl TransferService {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
         let id = Uuid::new_v4().to_string();
 
         let chat_msg = ChatMessage {
@@ -1305,6 +1309,7 @@ impl TransferService {
             from_instance_name: from_instance_name.clone(),
             content: content.clone(),
             timestamp,
+            local_seq: 0,
             is_self: true,
         };
         self.message_store.save_message(peer_instance_id, chat_msg).await?;
@@ -1455,6 +1460,7 @@ impl TransferService {
         let _ = self.history_store.add_record(TransferRecord {
             id: Uuid::new_v4().to_string(), file_name, file_size,
             direction: "send".to_string(), status: "completed".to_string(), error: None, timestamp: ts, elapsed_secs: elapsed,
+            save_path: Some(file_path.to_string_lossy().to_string()),
         }).await;
 
         Ok(file_id)

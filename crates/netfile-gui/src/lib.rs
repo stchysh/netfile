@@ -1,7 +1,7 @@
 use netfile_core::{
     generate_random_name, ChatMessage, Config, ConversationDelta, Device, DiscoveryService,
-    FriendInfo, HistoryStore, MessageStore, NatType, SignalClient, SignalStatus, TransferProgress, TransferRecord,
-    TransferService,
+    FriendInfo, HistoryStore, IrohManager, MessageStore, SignalClient, SignalStatus,
+    TransferProgress, TransferRecord, TransferService,
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -18,6 +18,7 @@ pub struct AppState {
     pub message_store: Arc<MessageStore>,
     pub history_store: Arc<HistoryStore>,
     pub signal_client: Arc<RwLock<Option<Arc<SignalClient>>>>,
+    pub iroh_manager: Arc<IrohManager>,
 }
 
 fn is_lan_addr(addr: SocketAddr) -> bool {
@@ -34,11 +35,7 @@ async fn try_direct_transfer(
     compression: bool,
     path_for_log: &str,
 ) -> bool {
-    tracing::info!(
-        "[punch-flow][gui] trying direct transfer to {} for {}",
-        candidate,
-        path_for_log
-    );
+    tracing::info!("trying direct transfer to {} for {}", candidate, path_for_log);
     let result = if path.is_dir() {
         service.send_folder(path.clone(), candidate, compression).await.map(|_| ())
     } else {
@@ -46,20 +43,36 @@ async fn try_direct_transfer(
     };
     match result {
         Ok(()) => {
-            tracing::info!(
-                "[punch-flow][gui] direct transfer succeeded via {} for {}",
-                candidate,
-                path_for_log
-            );
+            tracing::info!("direct transfer succeeded via {} for {}", candidate, path_for_log);
             true
         }
         Err(e) => {
-            tracing::warn!(
-                "[punch-flow][gui] direct transfer failed via {} for {}: {}",
-                candidate,
-                path_for_log,
-                e
-            );
+            tracing::warn!("direct transfer failed via {} for {}: {}", candidate, path_for_log, e);
+            false
+        }
+    }
+}
+
+async fn try_iroh_transfer(
+    service: &Arc<TransferService>,
+    path: &PathBuf,
+    iroh_addr_json: &str,
+    compression: bool,
+    path_for_log: &str,
+) -> bool {
+    tracing::info!("trying iroh transfer for {}", path_for_log);
+    let result = if path.is_dir() {
+        service.send_folder_via_iroh_str(path.clone(), iroh_addr_json, compression).await
+    } else {
+        service.send_via_iroh_str(path.clone(), iroh_addr_json, compression).await.map(|_| ())
+    };
+    match result {
+        Ok(()) => {
+            tracing::info!("iroh transfer succeeded for {}", path_for_log);
+            true
+        }
+        Err(e) => {
+            tracing::warn!("iroh transfer failed for {}: {}", path_for_log, e);
             false
         }
     }
@@ -91,57 +104,14 @@ async fn send_file(
         return Err(format!("文件不存在: {}", file_path));
     }
     let compression = enable_compression.unwrap_or(false);
-    tracing::info!(
-        "[punch-flow][gui] send_file start: target_addr={}, file_path={}, peer_device_id={:?}, peer_discovery_addr={:?}, compression={}",
-        target_addr,
-        file_path,
-        peer_device_id,
-        peer_discovery_addr,
-        compression
-    );
-    if addr.is_none() {
-        tracing::warn!(
-            "[punch-flow][gui] target_addr is not a valid SocketAddr: {}",
-            target_addr
-        );
-    }
 
     if let Some(ref da) = peer_discovery_addr {
-        match da.parse() {
-            Ok(disc_addr) => {
-                tracing::info!(
-                    "[punch-flow][gui] sending discovery punch packet to {}",
-                    disc_addr
-                );
-                match state.discovery_service.send_punch(disc_addr).await {
-                    Ok(()) => tracing::info!(
-                        "[punch-flow][gui] discovery punch packet sent to {}",
-                        disc_addr
-                    ),
-                    Err(e) => tracing::warn!(
-                        "[punch-flow][gui] failed to send discovery punch to {}: {}",
-                        disc_addr,
-                        e
-                    ),
-                }
-            }
-            Err(e) => tracing::warn!(
-                "[punch-flow][gui] invalid peer_discovery_addr {}: {}",
-                da,
-                e
-            ),
+        if let Ok(disc_addr) = da.parse() {
+            let _ = state.discovery_service.send_punch(disc_addr).await;
         }
     }
 
-    let local_nat = NatType::from_str(&state.transfer_service.nat_type_str());
     let lan_addr = addr.filter(|candidate| is_lan_addr(*candidate));
-    let public_addr = addr.filter(|candidate| !is_lan_addr(*candidate));
-    tracing::info!(
-        "[punch-flow][gui] local nat_type={}, lan_addr={:?}, public_addr={:?}",
-        local_nat.as_str(),
-        lan_addr,
-        public_addr
-    );
 
     let service = state.transfer_service.clone();
     let signal_client = state.signal_client.clone();
@@ -150,150 +120,34 @@ async fn send_file(
 
     tokio::spawn(async move {
         let mut direct_ok = false;
-        let mut punched_addr = None;
 
         if let Some(candidate) = lan_addr {
             direct_ok = try_direct_transfer(&service, &path, candidate, compression, &path_for_log).await;
         }
 
-        if !direct_ok && local_nat.is_punchable() {
+        if !direct_ok {
             if let Some(device_id) = peer_device_id.as_deref() {
                 let sc_guard = signal_client.read().await;
                 if let Some(sc) = sc_guard.as_ref() {
-                    tracing::info!(
-                        "[punch-flow][gui] requesting signal punch for peer_device_id={}",
-                        device_id
-                    );
-                    match sc.request_punch(device_id.to_string()).await {
-                        Ok(peer_addr_str) => {
-                            tracing::info!(
-                                "[punch-flow][gui] received punch coordinate from signal: {}",
-                                peer_addr_str
-                            );
-                            match peer_addr_str.parse::<SocketAddr>() {
-                                Ok(peer_addr) => {
-                                    punched_addr = Some(peer_addr);
-                                    tracing::info!(
-                                        "[punch-flow][gui] triggering local QUIC punch to {}",
-                                        peer_addr
-                                    );
-                                    service.punch_hole(peer_addr).await;
-                                }
-                                Err(e) => tracing::warn!(
-                                    "[punch-flow][gui] invalid peer_addr from signal {}: {}",
-                                    peer_addr_str,
-                                    e
-                                ),
-                            }
-                        }
-                        Err(e) => tracing::warn!(
-                            "[punch-flow][gui] request_punch failed for {}: {}",
-                            device_id,
-                            e
-                        ),
+                    if let Some(iroh_addr_json) = sc.get_peer_iroh_addr(device_id).await {
+                        direct_ok = try_iroh_transfer(&service, &path, &iroh_addr_json, compression, &path_for_log).await;
+                    } else {
+                        tracing::warn!("no iroh_addr for peer_device_id={}", device_id);
                     }
-                } else {
-                    tracing::warn!(
-                        "[punch-flow][gui] signal client not connected, skip request_punch for {}",
-                        device_id
-                    );
-                }
-            } else {
-                tracing::debug!("[punch-flow][gui] no peer_device_id provided, skip request_punch");
-            }
-
-            let mut candidates = Vec::new();
-            if let Some(candidate) = punched_addr {
-                candidates.push(candidate);
-            }
-            if let Some(candidate) = public_addr {
-                if !candidates.contains(&candidate) {
-                    candidates.push(candidate);
                 }
             }
-            tracing::info!(
-                "[punch-flow][gui] p2p direct transfer candidates for {}: {:?}",
-                path_for_log,
-                candidates
-            );
-
-            for candidate in candidates {
-                if try_direct_transfer(&service, &path, candidate, compression, &path_for_log).await {
-                    direct_ok = true;
-                    break;
-                }
-            }
-        } else if !direct_ok && public_addr.is_some() {
-            tracing::info!(
-                "[punch-flow][gui] local nat_type={} is not punchable, skip public direct/punch and prefer relay for {}",
-                local_nat.as_str(),
-                path_for_log
-            );
         }
 
         if !direct_ok {
-            tracing::info!(
-                "[punch-flow][gui] direct transfer failed for {}, trying relay fallback",
-                path_for_log
-            );
-            if let Some(device_id) = peer_device_id.as_deref() {
-                let sc_guard = signal_client.read().await;
-                if let Some(sc) = sc_guard.as_ref() {
-                    tracing::info!(
-                        "[punch-flow][gui] requesting relay for peer_device_id={}",
-                        device_id
-                    );
-                    if let Ok(relay_addr) = sc.request_relay(device_id).await {
-                        tracing::info!(
-                            "[punch-flow][gui] relay allocated at {}, start relay transfer for {}",
-                            relay_addr,
-                            path_for_log
-                        );
-                        let result = if path.is_dir() {
-                            service.send_folder_via_relay(path, relay_addr, compression).await
-                        } else {
-                            service.send_file_via_relay(path, relay_addr, compression).await.map(|_| ())
-                        };
-                        if let Err(e) = result {
-                            tracing::error!(
-                                "[punch-flow][gui] relay transfer failed for {} via {}: {}",
-                                path_for_log,
-                                relay_addr,
-                                e
-                            );
-                        } else {
-                            tracing::info!(
-                                "[punch-flow][gui] relay transfer succeeded for {} via {}",
-                                path_for_log,
-                                relay_addr
-                            );
-                        }
-                        return;
-                    } else {
-                        tracing::warn!(
-                            "[punch-flow][gui] request_relay failed for peer_device_id={}",
-                            device_id
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        "[punch-flow][gui] signal client missing, cannot request relay fallback for {}",
-                        path_for_log
-                    );
-                }
-            }
-            tracing::error!(
-                "[punch-flow][gui] transfer failed: no valid direct address and no relay available for {}",
-                path_for_log
-            );
+            tracing::error!("transfer failed: no valid path for {}", path_for_log);
         }
     });
     Ok(())
 }
 
 #[tauri::command]
-async fn get_my_public_addr(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    Ok(state.discovery_service.get_my_public_transfer_addr().await)
+async fn get_my_public_addr(_state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 #[tauri::command]
@@ -569,27 +423,14 @@ async fn update_config(
             let message_store = state.message_store.clone();
             let device_id = config.instance.instance_id.clone();
             let instance_name = config.instance.instance_name.clone();
-            let transfer_addr = state.transfer_service.public_addr().await
-                .unwrap_or_default();
-            let local_transfer_port = state.transfer_service.local_port();
-            let sc = SignalClient::new(device_id, instance_name, transfer_addr, new_signal_addr, local_transfer_port, message_store);
-            sc.update_nat_type(state.transfer_service.nat_type_str()).await;
+            let sc = SignalClient::new(device_id, instance_name, String::new(), new_signal_addr, message_store);
             if let Err(e) = sc.connect().await {
                 tracing::warn!("Signal connect failed: {}", e);
             } else {
-                let ts = state.transfer_service.clone();
-                sc.set_punch_handler(std::sync::Arc::new(move |addr| {
-                    tracing::info!(
-                        "[punch-flow][gui] punch handler callback received addr={}, start local QUIC punch",
-                        addr
-                    );
-                    let ts = ts.clone();
-                    tokio::spawn(async move { ts.punch_hole(addr).await; });
-                })).await;
-                let ts_ref = state.transfer_service.clone();
+                let iroh_mgr = state.iroh_manager.clone();
                 let sc_clone = sc.clone();
                 *sc_guard = Some(sc);
-                spawn_stun_watcher(sc_clone, ts_ref);
+                spawn_iroh_addr_watcher(sc_clone, iroh_mgr);
             }
         }
     }
@@ -604,29 +445,15 @@ async fn connect_signal_server(
 ) -> Result<(), String> {
     let config = state.config.read().await.clone();
     let message_store = state.message_store.clone();
-    let transfer_addr = state.transfer_service.public_addr().await
-        .unwrap_or_default();
-    let local_transfer_port = state.transfer_service.local_port();
     let sc = SignalClient::new(
         config.instance.instance_id.clone(),
         config.instance.instance_name.clone(),
-        transfer_addr,
+        String::new(),
         server_addr,
-        local_transfer_port,
         message_store,
     );
-    sc.update_nat_type(state.transfer_service.nat_type_str()).await;
     sc.connect().await.map_err(|e| e.to_string())?;
-    let ts = state.transfer_service.clone();
-    sc.set_punch_handler(std::sync::Arc::new(move |addr| {
-        tracing::info!(
-            "[punch-flow][gui] punch handler callback received addr={}, start local QUIC punch",
-            addr
-        );
-        let ts = ts.clone();
-        tokio::spawn(async move { ts.punch_hole(addr).await; });
-    })).await;
-    let ts_ref = state.transfer_service.clone();
+    let iroh_mgr = state.iroh_manager.clone();
     let sc_clone = sc.clone();
     let mut guard = state.signal_client.write().await;
     if let Some(old) = guard.take() {
@@ -634,7 +461,7 @@ async fn connect_signal_server(
     }
     *guard = Some(sc);
     drop(guard);
-    spawn_stun_watcher(sc_clone, ts_ref);
+    spawn_iroh_addr_watcher(sc_clone, iroh_mgr);
     Ok(())
 }
 
@@ -704,48 +531,22 @@ async fn send_relay_message(
     }
 }
 
-fn spawn_stun_watcher(sc: Arc<SignalClient>, transfer_service: Arc<TransferService>) {
+fn spawn_iroh_addr_watcher(sc: Arc<SignalClient>, iroh_manager: Arc<IrohManager>) {
     tokio::spawn(async move {
-        tracing::info!("[punch-flow][gui] stun watcher started");
-        let _ = transfer_service.refresh_public_addr().await;
-
-        let nat_type_str = transfer_service.nat_type_str();
-        tracing::info!(
-            "[punch-flow][gui] stun watcher initial nat_type={}",
-            nat_type_str
-        );
-        sc.update_nat_type(nat_type_str).await;
-
-        if let Some(addr) = transfer_service.public_addr().await {
-            tracing::info!(
-                "[punch-flow][gui] stun watcher initial transfer_addr update={}",
-                addr
-            );
-            sc.update_transfer_addr(addr).await;
-        } else {
-            tracing::warn!("[punch-flow][gui] stun watcher initial public_addr is empty");
+        tracing::info!("iroh addr watcher started");
+        iroh_manager.endpoint_ref().online().await;
+        let addr = iroh_manager.endpoint_addr();
+        if let Ok(addr_json) = serde_json::to_string(&addr) {
+            tracing::info!("initial iroh addr update");
+            sc.update_iroh_addr(addr_json).await;
         }
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-
-            let _ = transfer_service.refresh_public_addr().await;
-
-            let nat_type_str = transfer_service.nat_type_str();
-            tracing::debug!(
-                "[punch-flow][gui] stun watcher tick nat_type={}",
-                nat_type_str
-            );
-            sc.update_nat_type(nat_type_str).await;
-
-            if let Some(addr) = transfer_service.public_addr().await {
-                tracing::debug!(
-                    "[punch-flow][gui] stun watcher tick transfer_addr update={}",
-                    addr
-                );
-                sc.update_transfer_addr(addr).await;
-            } else {
-                tracing::debug!("[punch-flow][gui] stun watcher tick public_addr still empty");
+            let addr = iroh_manager.endpoint_addr();
+            if let Ok(addr_json) = serde_json::to_string(&addr) {
+                tracing::debug!("iroh addr watcher tick");
+                sc.update_iroh_addr(addr_json).await;
             }
         }
     });
@@ -842,6 +643,7 @@ pub fn run() {
                     config.transfer.require_confirmation,
                 ).await;
 
+                let iroh_manager = transfer_service.iroh_manager();
                 let message_store = transfer_service.message_store();
                 let history_store = transfer_service.history_store();
                 let transfer_port = transfer_service.local_port();
@@ -880,29 +682,15 @@ pub fn run() {
                     Arc::new(RwLock::new(None));
 
                 if !config.network.signal_server_addr.is_empty() {
-                    let transfer_addr = transfer_service.public_addr().await
-                        .unwrap_or_default();
-                    let local_transfer_port = transfer_service.local_port();
                     let sc = SignalClient::new(
                         config.instance.instance_id.clone(),
                         config.instance.instance_name.clone(),
-                        transfer_addr,
+                        String::new(),
                         config.network.signal_server_addr.clone(),
-                        local_transfer_port,
                         message_store.clone(),
                     );
-                    sc.update_nat_type(transfer_service.nat_type_str()).await;
                     if let Ok(()) = sc.connect().await {
-                        let ts = transfer_service.clone();
-                        sc.set_punch_handler(std::sync::Arc::new(move |addr| {
-                            tracing::info!(
-                                "[punch-flow][gui] punch handler callback received addr={}, start local QUIC punch",
-                                addr
-                            );
-                            let ts = ts.clone();
-                            tokio::spawn(async move { ts.punch_hole(addr).await; });
-                        })).await;
-                        spawn_stun_watcher(sc.clone(), transfer_service.clone());
+                        spawn_iroh_addr_watcher(sc.clone(), iroh_manager.clone());
                         *signal_client.write().await = Some(sc);
                     }
                 }
@@ -914,6 +702,7 @@ pub fn run() {
                     message_store,
                     history_store,
                     signal_client,
+                    iroh_manager,
                 });
 
                 Ok(())

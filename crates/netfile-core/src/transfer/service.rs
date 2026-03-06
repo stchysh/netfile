@@ -5,77 +5,24 @@ use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
 use crate::protocol::{Message, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
 use crate::message_store::{ChatMessage, MessageStore};
+use crate::iroh_net::IrohManager;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::DigitallySignedStruct;
-
-#[derive(Debug)]
-struct SkipServerVerification;
-
-impl ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-        ]
-    }
-}
-
 pub struct TransferService {
     tcp_listener: Arc<TcpListener>,
-    quic_endpoint: Arc<quinn::Endpoint>,
+    iroh_manager: Arc<IrohManager>,
     transfer_port: u16,
-    public_addr: Arc<RwLock<Option<String>>>,
-    nat_type: Arc<RwLock<crate::stun::NatType>>,
-    connection_cache: Arc<RwLock<HashMap<SocketAddr, quinn::Connection>>>,
+    iroh_conn_cache: Arc<RwLock<HashMap<iroh::EndpointId, iroh::endpoint::Connection>>>,
     task_queue: Arc<TaskQueue>,
     progress_tracker: Arc<ProgressTracker>,
     cancelled: Arc<RwLock<HashSet<String>>>,
@@ -119,52 +66,9 @@ impl TransferService {
         };
 
         let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+        let iroh_manager = IrohManager::new(data_dir.clone()).await?;
 
-        let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port))?;
-        std_socket.set_nonblocking(true)?;
-        let tokio_socket = tokio::net::UdpSocket::from_std(std_socket)?;
-
-        let stun_client = crate::stun::StunClient::new();
-
-        let public_addr = match tokio::time::timeout(
-            Duration::from_secs(5),
-            stun_client.get_public_address_with_socket(&tokio_socket),
-        ).await {
-            Ok(Ok(addr)) => {
-                info!("STUN discovered public address for QUIC endpoint: {}", addr);
-                Some(addr.to_string())
-            }
-            Ok(Err(e)) => {
-                warn!("STUN query for QUIC endpoint failed: {}", e);
-                None
-            }
-            Err(_) => {
-                warn!("STUN query for QUIC endpoint timed out");
-                None
-            }
-        };
-
-        let nat_type = match tokio::time::timeout(
-            Duration::from_secs(8),
-            stun_client.detect_nat_type_with_socket(&tokio_socket),
-        ).await {
-            Ok(Ok(nt)) => {
-                info!("NAT type detected: {:?}", nt);
-                nt
-            }
-            Ok(Err(e)) => {
-                warn!("NAT type detection failed: {}, assuming ConeNat", e);
-                crate::stun::NatType::ConeNat
-            }
-            Err(_) => {
-                warn!("NAT type detection timed out, assuming ConeNat");
-                crate::stun::NatType::ConeNat
-            }
-        };
-
-        let std_socket = tokio_socket.into_std()?;
-        let quic_endpoint = Self::create_quic_endpoint_from_socket(std_socket, &data_dir).await?;
-        info!("Transfer service listening on port {} (QUIC + TCP relay)", port);
+        info!("Transfer service listening on port {} (TCP + iroh)", port);
 
         let message_store = Arc::new(MessageStore::new(data_dir.clone()));
         let history_store = Arc::new(HistoryStore::new(data_dir.clone()));
@@ -172,11 +76,9 @@ impl TransferService {
 
         Ok(Self {
             tcp_listener: Arc::new(tcp_listener),
-            quic_endpoint: Arc::new(quic_endpoint),
+            iroh_manager,
             transfer_port: port,
-            public_addr: Arc::new(RwLock::new(public_addr)),
-            nat_type: Arc::new(RwLock::new(nat_type)),
-            connection_cache: Arc::new(RwLock::new(HashMap::new())),
+            iroh_conn_cache: Arc::new(RwLock::new(HashMap::new())),
             task_queue: Arc::new(TaskQueue::new(max_concurrent)),
             progress_tracker: Arc::new(ProgressTracker::new()),
             cancelled: Arc::new(RwLock::new(HashSet::new())),
@@ -194,51 +96,9 @@ impl TransferService {
         })
     }
 
-    async fn create_quic_endpoint_from_socket(socket: std::net::UdpSocket, data_dir: &PathBuf) -> Result<quinn::Endpoint> {
-        let tls_mgr = crate::tls::TlsManager::new(data_dir.clone());
-        tls_mgr.ensure_certificate().await?;
-
-        let cert_path = data_dir.join("certs/cert.pem");
-        let key_path = data_dir.join("certs/key.pem");
-        let cert_pem = tokio::fs::read(&cert_path).await?;
-        let key_pem = tokio::fs::read(&key_path).await?;
-
-        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
-            .filter_map(|c| c.ok())
-            .map(|c| c.into_owned())
-            .collect();
-        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_slice())?
-            .ok_or_else(|| anyhow::anyhow!("No private key found"))?
-            .clone_key();
-
-        let server_config = quinn::ServerConfig::with_single_cert(certs, key)
-            .map_err(|e| anyhow::anyhow!("QUIC server config error: {}", e))?;
-
-        let client_crypto = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-            .with_no_client_auth();
-        let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
-            .map_err(|e| anyhow::anyhow!("QUIC client config error: {}", e))?;
-        let client_config = quinn::ClientConfig::new(Arc::new(quic_client));
-
-        let runtime = quinn::default_runtime()
-            .ok_or_else(|| anyhow::anyhow!("no async runtime found"))?;
-        let mut endpoint = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            Some(server_config),
-            socket,
-            runtime,
-        )?;
-        endpoint.set_default_client_config(client_config);
-
-        info!("QUIC endpoint created from existing socket");
-        Ok(endpoint)
-    }
-
     async fn find_available_port() -> Result<u16> {
         for port in 37050..37100 {
-            match tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
                 Ok(_) => return Ok(port),
                 Err(_) => continue,
             }
@@ -247,10 +107,10 @@ impl TransferService {
     }
 
     pub async fn start(self: Arc<Self>) {
-        let accept_quic_task = {
+        let accept_iroh_task = {
             let service = self.clone();
             tokio::spawn(async move {
-                service.accept_quic_loop().await;
+                service.accept_iroh_loop().await;
             })
         };
 
@@ -268,29 +128,28 @@ impl TransferService {
             })
         };
 
-        let _ = tokio::join!(accept_quic_task, accept_tcp_task, process_task);
+        let _ = tokio::join!(accept_iroh_task, accept_tcp_task, process_task);
     }
 
-    async fn accept_quic_loop(&self) {
-        while let Some(incoming) = self.quic_endpoint.accept().await {
+    async fn accept_iroh_loop(&self) {
+        while let Some(incoming) = self.iroh_manager.accept().await {
             let service = Arc::new(self.clone());
             tokio::spawn(async move {
                 let conn = match incoming.accept() {
-                    Ok(c) => match c.await {
+                    Ok(connecting) => match connecting.await {
                         Ok(c) => c,
-                        Err(e) => { error!("QUIC connection failed: {}", e); return; }
+                        Err(e) => { error!("iroh connection failed: {}", e); return; }
                     },
-                    Err(e) => { error!("QUIC accept error: {}", e); return; }
+                    Err(e) => { error!("iroh accept error: {}", e); return; }
                 };
-                let addr = conn.remote_address();
                 match conn.accept_bi().await {
-                    Ok((send, recv)) => {
-                        if let Err(e) = service.handle_connection(send, recv, addr).await {
-                            debug!("QUIC connection from {} ended: {}", addr, e);
+                    Ok((mut send, mut recv)) => {
+                        if let Err(e) = service.handle_connection(&mut send, &mut recv).await {
+                            debug!("iroh connection ended: {}", e);
                         }
                     }
-                    Err(_) => {
-                        debug!("QUIC punch connection from {}", addr);
+                    Err(e) => {
+                        debug!("iroh accept_bi error: {}", e);
                     }
                 }
             });
@@ -304,7 +163,7 @@ impl TransferService {
                     let service = Arc::new(self.clone());
                     tokio::spawn(async move {
                         if let Err(e) = service.handle_tcp_connection(stream, addr).await {
-                            debug!("TCP relay connection from {} ended: {}", addr, e);
+                            debug!("TCP connection from {} ended: {}", addr, e);
                         }
                     });
                 }
@@ -315,180 +174,19 @@ impl TransferService {
         }
     }
 
-    async fn handle_tcp_connection(&self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
+    async fn handle_tcp_connection(&self, stream: TcpStream, addr: SocketAddr) -> Result<()> {
         stream.set_nodelay(true)?;
-        info!("New TCP relay connection from {}", addr);
-        let message = Self::read_msg_tcp(&mut stream).await?;
-        match message {
-            Message::TransferRequest(request) => {
-                self.handle_transfer_request_tcp(stream, request).await?;
-            }
-            Message::TextMessage(msg) => {
-                self.handle_text_message_tcp(stream, msg).await?;
-            }
-            _ => {
-                warn!("Unexpected TCP message type from {}", addr);
-            }
-        }
-        Ok(())
+        info!("New TCP connection from {}", addr);
+        let (mut read_half, mut write_half) = stream.into_split();
+        self.handle_connection(&mut write_half, &mut read_half).await
     }
 
-    async fn read_msg_tcp(stream: &mut TcpStream) -> Result<Message> {
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > 64 * 1024 * 1024 {
-            return Err(anyhow::anyhow!("Message too large: {} bytes", len));
-        }
-        let mut buf = vec![0u8; len];
-        stream.read_exact(&mut buf).await?;
-        Message::from_bytes(&buf)
-    }
-
-    async fn write_msg_tcp(stream: &mut TcpStream, msg: &Message) -> Result<()> {
-        let data = msg.to_bytes()?;
-        let len = (data.len() as u32).to_be_bytes();
-        stream.write_all(&len).await?;
-        stream.write_all(&data).await?;
-        stream.flush().await?;
-        Ok(())
-    }
-
-    async fn write_chunk_raw_tcp(
-        stream: &mut TcpStream,
-        chunk_index: u32,
-        compressed: bool,
-        data: &[u8],
-    ) -> Result<()> {
-        let mut header = [0u8; 9];
-        header[0..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        header[4..8].copy_from_slice(&chunk_index.to_le_bytes());
-        header[8] = compressed as u8;
-        stream.write_all(&header).await?;
-        stream.write_all(data).await?;
-        Ok(())
-    }
-
-    async fn read_chunk_raw_tcp(stream: &mut TcpStream) -> Result<(u32, bool, Vec<u8>)> {
-        let mut header = [0u8; 9];
-        stream.read_exact(&mut header).await?;
-        let data_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
-        let chunk_index = u32::from_le_bytes(header[4..8].try_into().unwrap());
-        let compressed = header[8] != 0;
-        if data_len > 128 * 1024 * 1024 {
-            return Err(anyhow::anyhow!("Chunk too large: {} bytes", data_len));
-        }
-        let mut data = vec![0u8; data_len];
-        stream.read_exact(&mut data).await?;
-        Ok((chunk_index, compressed, data))
-    }
-
-    async fn handle_transfer_request_tcp(
+    async fn handle_connection<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &self,
-        mut stream: TcpStream,
-        request: TransferRequest,
+        send: &mut W,
+        recv: &mut R,
     ) -> Result<()> {
-        info!("Received TCP relay transfer request: {} ({} bytes)", request.file_name, request.file_size);
-        let file_id = request.file_id.clone();
-        let progress_id = format!("recv:{}", file_id);
-        let total_chunks = ((request.file_size + request.chunk_size as u64 - 1) / request.chunk_size as u64) as u32;
-
-        if *self.require_confirmation.read().await {
-            self.progress_tracker.register_pending_confirm(progress_id.clone(), request.file_name.clone(), request.file_size).await;
-            let (tx, rx) = oneshot::channel();
-            self.pending_confirmations.write().await.insert(progress_id.clone(), tx);
-            let accepted = rx.await.unwrap_or(false);
-            self.progress_tracker.remove_progress(&progress_id).await;
-            if !accepted {
-                let _ = Self::write_msg_tcp(&mut stream, &Message::TransferResponse(TransferResponse {
-                    file_id: file_id.clone(), accepted: false, save_path: None, resume_from_chunk: None,
-                })).await;
-                return Ok(());
-            }
-        }
-
-        let download_dir = self.download_dir.read().await.clone();
-        let mut receiver = FileReceiver::new(request.clone(), download_dir.clone(), self.data_dir.clone()).await?;
-        let resume_from_chunk = receiver.resume_from_chunk();
-
-        self.progress_tracker.start_transfer(progress_id.clone(), request.file_name.clone(), request.file_size, total_chunks, "receive".to_string()).await;
-
-        Self::write_msg_tcp(&mut stream, &Message::TransferResponse(TransferResponse {
-            file_id: file_id.clone(), accepted: true,
-            save_path: Some(download_dir.to_string_lossy().to_string()),
-            resume_from_chunk: if resume_from_chunk > 0 { Some(resume_from_chunk) } else { None },
-        })).await?;
-
-        for _ in 0..(total_chunks - resume_from_chunk) {
-            let (chunk_index, compressed, data) = match Self::read_chunk_raw_tcp(&mut stream).await {
-                Ok(r) => r,
-                Err(e) => { receiver.cleanup().await; self.progress_tracker.remove_progress(&progress_id).await; return Err(e); }
-            };
-            let write_data: Vec<u8> = if compressed {
-                match crate::compression::Compressor::decompress(&data) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        let _ = Self::write_msg_tcp(&mut stream, &Message::TransferError(TransferError { file_id: file_id.clone(), error: e.to_string() })).await;
-                        receiver.cleanup().await;
-                        self.progress_tracker.remove_progress(&progress_id).await;
-                        return Err(e);
-                    }
-                }
-            } else { data };
-            let chunk_bytes_len = write_data.len() as u64;
-            if let Err(e) = receiver.write_chunk_raw(chunk_index, &write_data).await {
-                let _ = Self::write_msg_tcp(&mut stream, &Message::TransferError(TransferError { file_id: file_id.clone(), error: e.to_string() })).await;
-                receiver.cleanup().await; self.progress_tracker.remove_progress(&progress_id).await; return Err(e);
-            }
-            self.progress_tracker.update_progress(&progress_id, chunk_bytes_len).await;
-        }
-
-        let tc = match Self::read_msg_tcp(&mut stream).await {
-            Ok(Message::TransferComplete(tc)) => tc,
-            Ok(_) => { receiver.cleanup().await; self.progress_tracker.remove_progress(&progress_id).await; return Ok(()); }
-            Err(e) => { receiver.cleanup().await; self.progress_tracker.remove_progress(&progress_id).await; return Err(e); }
-        };
-
-        match receiver.finalize(tc.file_hash).await {
-            Ok(()) => {
-                Self::write_msg_tcp(&mut stream, &Message::TransferComplete(TransferComplete { file_id: file_id.clone(), file_hash: tc.file_hash })).await?;
-            }
-            Err(e) => {
-                let _ = Self::write_msg_tcp(&mut stream, &Message::TransferError(TransferError { file_id: file_id.clone(), error: e.to_string() })).await;
-                receiver.cleanup().await; self.progress_tracker.remove_progress(&progress_id).await; return Err(e);
-            }
-        }
-
-        let elapsed = self.progress_tracker.get_progress(&progress_id).await.map(|p| p.start_time.elapsed().as_secs()).unwrap_or(0);
-        self.progress_tracker.remove_progress(&progress_id).await;
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        let _ = self.history_store.add_record(TransferRecord {
-            id: Uuid::new_v4().to_string(), file_name: request.file_name.clone(), file_size: request.file_size,
-            direction: "receive".to_string(), status: "completed".to_string(), error: None, timestamp: ts, elapsed_secs: elapsed,
-            save_path: Some(download_dir.join(request.relative_path.as_deref().unwrap_or(&request.file_name)).to_string_lossy().to_string()),
-        }).await;
-        Ok(())
-    }
-
-    async fn handle_text_message_tcp(&self, mut stream: TcpStream, msg: TextMessage) -> Result<()> {
-        let chat_msg = ChatMessage {
-            id: msg.id.clone(), from_instance_id: msg.from_instance_id.clone(),
-            from_instance_name: msg.from_instance_name.clone(), content: msg.content.clone(),
-            timestamp: msg.timestamp, local_seq: 0, is_self: false,
-        };
-        self.message_store.save_message(&msg.from_instance_id, chat_msg).await?;
-        Self::write_msg_tcp(&mut stream, &Message::TextAck(TextAck { message_id: msg.id })).await?;
-        Ok(())
-    }
-
-    async fn handle_connection(
-        &self,
-        send: quinn::SendStream,
-        mut recv: quinn::RecvStream,
-        addr: SocketAddr,
-    ) -> Result<()> {
-        info!("New QUIC connection from {}", addr);
-        let message = Self::read_msg(&mut recv).await?;
+        let message = Self::read_msg(recv).await?;
         match message {
             Message::TransferRequest(request) => {
                 self.handle_transfer_request(send, recv, request).await?;
@@ -498,13 +196,13 @@ impl TransferService {
             }
             #[allow(unreachable_patterns)]
             _ => {
-                warn!("Unexpected message type from {}", addr);
+                warn!("Unexpected message type");
             }
         }
         Ok(())
     }
 
-    async fn read_msg(recv: &mut quinn::RecvStream) -> Result<Message> {
+    async fn read_msg<R: AsyncRead + Unpin>(recv: &mut R) -> Result<Message> {
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
@@ -516,16 +214,17 @@ impl TransferService {
         Message::from_bytes(&buf)
     }
 
-    async fn write_msg(send: &mut quinn::SendStream, msg: &Message) -> Result<()> {
+    async fn write_msg<W: AsyncWrite + Unpin>(send: &mut W, msg: &Message) -> Result<()> {
         let data = msg.to_bytes()?;
         let len = (data.len() as u32).to_be_bytes();
         send.write_all(&len).await?;
         send.write_all(&data).await?;
+        send.flush().await?;
         Ok(())
     }
 
-    async fn write_chunk_raw(
-        send: &mut quinn::SendStream,
+    async fn write_chunk_raw<W: AsyncWrite + Unpin>(
+        send: &mut W,
         chunk_index: u32,
         compressed: bool,
         data: &[u8],
@@ -539,7 +238,7 @@ impl TransferService {
         Ok(())
     }
 
-    async fn read_chunk_raw(recv: &mut quinn::RecvStream) -> Result<(u32, bool, Vec<u8>)> {
+    async fn read_chunk_raw<R: AsyncRead + Unpin>(recv: &mut R) -> Result<(u32, bool, Vec<u8>)> {
         let mut header = [0u8; 9];
         recv.read_exact(&mut header).await?;
         let data_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
@@ -553,10 +252,10 @@ impl TransferService {
         Ok((chunk_index, compressed, data))
     }
 
-    async fn handle_transfer_request(
+    async fn handle_transfer_request<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &self,
-        mut send: quinn::SendStream,
-        mut recv: quinn::RecvStream,
+        send: &mut W,
+        recv: &mut R,
         request: TransferRequest,
     ) -> Result<()> {
         info!(
@@ -578,7 +277,7 @@ impl TransferService {
             let accepted = rx.await.unwrap_or(false);
             self.progress_tracker.remove_progress(&progress_id).await;
             if !accepted {
-                let _ = Self::write_msg(&mut send, &Message::TransferResponse(TransferResponse {
+                let _ = Self::write_msg(send, &Message::TransferResponse(TransferResponse {
                     file_id: file_id.clone(),
                     accepted: false,
                     save_path: None,
@@ -615,10 +314,10 @@ impl TransferService {
             resume_from_chunk: if resume_from_chunk > 0 { Some(resume_from_chunk) } else { None },
         };
 
-        Self::write_msg(&mut send, &Message::TransferResponse(response)).await?;
+        Self::write_msg(send, &Message::TransferResponse(response)).await?;
 
         for _ in 0..(total_chunks - resume_from_chunk) {
-            let (chunk_index, compressed, data) = match Self::read_chunk_raw(&mut recv).await {
+            let (chunk_index, compressed, data) = match Self::read_chunk_raw(recv).await {
                 Ok(r) => r,
                 Err(e) => {
                     receiver.cleanup().await;
@@ -631,13 +330,13 @@ impl TransferService {
                 match crate::compression::Compressor::decompress(&data) {
                     Ok(d) => d,
                     Err(e) => {
-                        let _ = Self::write_msg(&mut send, &Message::TransferError(TransferError {
+                        let _ = Self::write_msg(send, &Message::TransferError(TransferError {
                             file_id: file_id.clone(),
                             error: e.to_string(),
                         })).await;
                         receiver.cleanup().await;
                         self.progress_tracker.remove_progress(&progress_id).await;
-                        return Err(e.into());
+                        return Err(e);
                     }
                 }
             } else {
@@ -646,7 +345,7 @@ impl TransferService {
 
             let chunk_bytes_len = write_data.len() as u64;
             if let Err(e) = receiver.write_chunk_raw(chunk_index, &write_data).await {
-                let _ = Self::write_msg(&mut send, &Message::TransferError(TransferError {
+                let _ = Self::write_msg(send, &Message::TransferError(TransferError {
                     file_id: file_id.clone(),
                     error: e.to_string(),
                 })).await;
@@ -658,7 +357,7 @@ impl TransferService {
             self.progress_tracker.update_progress(&progress_id, chunk_bytes_len).await;
         }
 
-        let tc = match Self::read_msg(&mut recv).await {
+        let tc = match Self::read_msg(recv).await {
             Ok(Message::TransferComplete(tc)) => tc,
             Ok(_) => {
                 warn!("Expected TransferComplete but got unexpected message");
@@ -676,14 +375,13 @@ impl TransferService {
         match receiver.finalize(tc.file_hash).await {
             Ok(()) => {
                 info!("Transfer completed for file: {}", file_id);
-                Self::write_msg(&mut send, &Message::TransferComplete(TransferComplete {
+                Self::write_msg(send, &Message::TransferComplete(TransferComplete {
                     file_id: file_id.clone(),
                     file_hash: tc.file_hash,
                 })).await?;
-                let _ = send.finish();
             }
             Err(e) => {
-                let _ = Self::write_msg(&mut send, &Message::TransferError(TransferError {
+                let _ = Self::write_msg(send, &Message::TransferError(TransferError {
                     file_id: file_id.clone(),
                     error: e.to_string(),
                 })).await;
@@ -717,7 +415,7 @@ impl TransferService {
         Ok(())
     }
 
-    async fn handle_text_message(&self, mut send: quinn::SendStream, msg: TextMessage) -> Result<()> {
+    async fn handle_text_message<W: AsyncWrite + Unpin>(&self, send: &mut W, msg: TextMessage) -> Result<()> {
         let chat_msg = ChatMessage {
             id: msg.id.clone(),
             from_instance_id: msg.from_instance_id.clone(),
@@ -728,10 +426,9 @@ impl TransferService {
             is_self: false,
         };
         self.message_store.save_message(&msg.from_instance_id, chat_msg).await?;
-        Self::write_msg(&mut send, &Message::TextAck(TextAck {
+        Self::write_msg(send, &Message::TextAck(TextAck {
             message_id: msg.id,
         })).await?;
-        let _ = send.finish();
         Ok(())
     }
 
@@ -873,87 +570,131 @@ impl TransferService {
         Ok(())
     }
 
-    pub async fn send_file_with_fallback(
+    pub async fn send_via_iroh(
         &self,
         file_path: PathBuf,
-        primary_addr: SocketAddr,
-        _fallback_addr: Option<SocketAddr>,
+        endpoint_addr: iroh::EndpointAddr,
         enable_compression: bool,
     ) -> Result<String> {
-        self.do_send_file(file_path, None, primary_addr, enable_compression).await
+        self.do_send_file_iroh(file_path, None, endpoint_addr, enable_compression).await
     }
 
-    pub async fn send_folder_with_fallback(
+    pub async fn send_via_iroh_str(
+        &self,
+        file_path: PathBuf,
+        endpoint_addr_json: &str,
+        enable_compression: bool,
+    ) -> Result<String> {
+        let endpoint_addr: iroh::EndpointAddr = serde_json::from_str(endpoint_addr_json)
+            .map_err(|e| anyhow::anyhow!("invalid iroh addr: {}", e))?;
+        self.do_send_file_iroh(file_path, None, endpoint_addr, enable_compression).await
+    }
+
+    pub async fn send_folder_via_iroh(
         &self,
         folder_path: PathBuf,
-        primary_addr: SocketAddr,
-        _fallback_addr: Option<SocketAddr>,
+        endpoint_addr: iroh::EndpointAddr,
         enable_compression: bool,
     ) -> Result<()> {
-        self.send_folder(folder_path, primary_addr, enable_compression).await
-    }
+        let folder_name = folder_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("folder")
+            .to_string();
 
-    pub async fn punch_hole(&self, peer_addr: SocketAddr) {
-        info!("Starting QUIC punch hole to {}", peer_addr);
-        if let Ok(connecting) = self.quic_endpoint.connect(peer_addr, "netfile") {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                connecting,
-            ).await {
-                Ok(Ok(conn)) => {
-                    info!("QUIC punch hole succeeded to {}, caching connection", peer_addr);
-                    self.connection_cache.write().await.insert(peer_addr, conn);
-                }
-                Ok(Err(e)) => {
-                    warn!("QUIC punch hole failed to {}: {}", peer_addr, e);
-                }
+        let entries = super::directory::scan_directory(&folder_path).await?;
+        let file_entries: Vec<_> = entries.into_iter().filter(|e| !e.is_dir).collect();
+
+        if file_entries.is_empty() {
+            return Ok(());
+        }
+
+        let chunk_size = *self.chunk_size.read().await;
+        let total_size: u64 = file_entries.iter().map(|e| e.size).sum();
+        let total_chunks: u32 = file_entries
+            .iter()
+            .map(|e| ((e.size + chunk_size as u64 - 1) / chunk_size as u64) as u32)
+            .sum();
+
+        let folder_id = Uuid::new_v4().to_string();
+
+        self.progress_tracker
+            .register_queued(
+                folder_id.clone(),
+                format!("{}/", folder_name),
+                total_size,
+                total_chunks,
+                "send".to_string(),
+            )
+            .await;
+
+        let _permit = {
+            let sem = self.semaphore.read().await.clone();
+            match sem.acquire_owned().await {
+                Ok(p) => p,
                 Err(_) => {
-                    warn!("QUIC punch hole timed out to {} after 8s", peer_addr);
+                    self.progress_tracker.remove_progress(&folder_id).await;
+                    return Err(anyhow::anyhow!("Transfer semaphore closed"));
                 }
             }
-        } else {
-            warn!("Failed to initiate QUIC connection to {}", peer_addr);
+        };
+
+        self.progress_tracker.set_active(&folder_id).await;
+
+        for entry in &file_entries {
+            if self.cancelled.read().await.contains(&folder_id) {
+                break;
+            }
+
+            let current_name = entry.relative_path.to_string_lossy().replace('\\', "/");
+            self.progress_tracker
+                .set_current_file(&folder_id, current_name.clone())
+                .await;
+
+            let abs_path = folder_path.join(&entry.relative_path);
+            let rel = format!("{}/{}", folder_name, current_name);
+
+            if let Err(e) = self
+                .send_file_for_folder_iroh(&folder_id, abs_path, Some(rel), endpoint_addr.clone(), enable_compression, chunk_size)
+                .await
+            {
+                warn!("Failed to send file in folder via iroh {}: {}", current_name, e);
+            }
         }
+
+        self.progress_tracker.remove_progress(&folder_id).await;
+        self.cancelled.write().await.remove(&folder_id);
+
+        Ok(())
     }
 
-    pub fn nat_type_blocking(&self) -> crate::stun::NatType {
-        *self.nat_type.blocking_read()
+    pub async fn send_folder_via_iroh_str(
+        &self,
+        folder_path: PathBuf,
+        endpoint_addr_json: &str,
+        enable_compression: bool,
+    ) -> Result<()> {
+        let endpoint_addr: iroh::EndpointAddr = serde_json::from_str(endpoint_addr_json)
+            .map_err(|e| anyhow::anyhow!("invalid iroh addr: {}", e))?;
+        self.send_folder_via_iroh(folder_path, endpoint_addr, enable_compression).await
     }
 
-    async fn get_or_connect(&self, target_addr: SocketAddr) -> Result<quinn::Connection> {
+    async fn iroh_get_or_connect(&self, endpoint_addr: iroh::EndpointAddr) -> Result<iroh::endpoint::Connection> {
+        let id = endpoint_addr.id;
         {
-            let cache = self.connection_cache.read().await;
-            if let Some(conn) = cache.get(&target_addr) {
+            let cache = self.iroh_conn_cache.read().await;
+            if let Some(conn) = cache.get(&id) {
                 if conn.close_reason().is_none() {
-                    debug!("Reusing cached QUIC connection to {}", target_addr);
+                    debug!("Reusing cached iroh connection to {:?}", id);
                     return Ok(conn.clone());
                 }
             }
         }
-        self.connection_cache.write().await.remove(&target_addr);
+        self.iroh_conn_cache.write().await.remove(&id);
 
-        info!("Establishing new QUIC connection to {}", target_addr);
-        let conn = match self.quic_endpoint.connect(target_addr, "netfile") {
-            Ok(c) => match tokio::time::timeout(std::time::Duration::from_secs(8), c).await {
-                Ok(Ok(c)) => {
-                    info!("QUIC connection established to {}", target_addr);
-                    c
-                }
-                Ok(Err(e)) => {
-                    error!("QUIC connection failed to {}: {}", target_addr, e);
-                    return Err(e.into());
-                }
-                Err(_) => {
-                    error!("QUIC connection timed out to {} after 8s", target_addr);
-                    return Err(anyhow::anyhow!("QUIC connection timed out"));
-                }
-            },
-            Err(e) => {
-                error!("Failed to initiate QUIC connection to {}: {}", target_addr, e);
-                return Err(e.into());
-            }
-        };
-        self.connection_cache.write().await.insert(target_addr, conn.clone());
+        info!("Establishing new iroh connection to {:?}", id);
+        let conn = self.iroh_manager.connect(endpoint_addr).await?;
+        self.iroh_conn_cache.write().await.insert(id, conn.clone());
         Ok(conn)
     }
 
@@ -1006,7 +747,329 @@ impl TransferService {
             password_hash: None,
         };
 
-        let conn = match self.get_or_connect(target_addr).await {
+        let stream = match TcpStream::connect(target_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e.into());
+            }
+        };
+        stream.set_nodelay(true)?;
+        let (mut read_half, mut write_half) = stream.into_split();
+
+        if let Err(e) = Self::write_msg(&mut write_half, &Message::TransferRequest(request)).await {
+            self.progress_tracker.set_error(&file_id, format!("Send request failed: {}", e)).await;
+            return Err(e);
+        }
+
+        let resume_from = {
+            let response = match Self::read_msg(&mut read_half).await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e);
+                }
+            };
+            if let Message::TransferResponse(resp) = response {
+                if !resp.accepted {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(anyhow::anyhow!("Transfer rejected by receiver"));
+                }
+                resp.resume_from_chunk.unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        let _permit = {
+            let sem = self.semaphore.read().await.clone();
+            match sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(anyhow::anyhow!("Transfer semaphore closed"));
+                }
+            }
+        };
+
+        self.progress_tracker.set_active(&file_id).await;
+
+        let mut file = tokio::fs::File::open(&file_path).await?;
+        let mut hasher = Sha256::new();
+
+        if resume_from > 0 {
+            let skip_bytes = resume_from as u64 * chunk_size as u64;
+            let mut remaining_skip = skip_bytes;
+            let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
+            while remaining_skip > 0 {
+                let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
+                file.read_exact(&mut skip_buf[..read_size]).await?;
+                hasher.update(&skip_buf[..read_size]);
+                remaining_skip -= read_size as u64;
+            }
+        }
+
+        for chunk_index in resume_from..total_chunks {
+            if self.cancelled.read().await.contains(&file_id) {
+                self.progress_tracker.remove_progress(&file_id).await;
+                self.cancelled.write().await.remove(&file_id);
+                info!("Transfer cancelled: {}", file_id);
+                return Ok(file_id);
+            }
+
+            loop {
+                if !self.paused.read().await.contains(&file_id) { break; }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            let offset = chunk_index as u64 * chunk_size as u64;
+            let remaining = file_size - offset;
+            let read_size = (chunk_size as u64).min(remaining) as usize;
+            let mut buffer = vec![0u8; read_size];
+            file.read_exact(&mut buffer).await?;
+
+            hasher.update(&buffer);
+
+            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+                match crate::compression::Compressor::compress(&buffer) {
+                    Ok(c) if c.len() < buffer.len() => (c, true),
+                    _ => (buffer, false),
+                }
+            } else {
+                (buffer, false)
+            };
+
+            let chunk_bytes_len = send_data.len() as u64;
+            Self::write_chunk_raw(&mut write_half, chunk_index, compressed, &send_data).await?;
+            self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
+
+            if speed_limit_bytes_per_sec > 0 {
+                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+                tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
+            }
+        }
+
+        let hash_result = hasher.finalize();
+        let mut file_hash = [0u8; 32];
+        file_hash.copy_from_slice(&hash_result);
+
+        Self::write_msg(&mut write_half, &Message::TransferComplete(TransferComplete {
+            file_id: file_id.clone(),
+            file_hash,
+        })).await?;
+
+        match Self::read_msg(&mut read_half).await? {
+            Message::TransferComplete(_) => {}
+            Message::TransferError(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(anyhow::anyhow!("Receiver error: {}", e.error));
+            }
+            _ => {}
+        }
+
+        let elapsed = self.progress_tracker.get_progress(&file_id).await
+            .map(|p| p.start_time.elapsed().as_secs())
+            .unwrap_or(0);
+        self.progress_tracker.remove_progress(&file_id).await;
+        info!("File transfer completed: {}", file_id);
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = self.history_store.add_record(TransferRecord {
+            id: Uuid::new_v4().to_string(),
+            file_name: file_name.clone(),
+            file_size,
+            direction: "send".to_string(),
+            status: "completed".to_string(),
+            error: None,
+            timestamp: ts,
+            elapsed_secs: elapsed,
+            save_path: Some(file_path.to_string_lossy().to_string()),
+        }).await;
+
+        Ok(file_id)
+    }
+
+    async fn send_file_for_folder(
+        &self,
+        folder_id: &str,
+        file_path: PathBuf,
+        relative_path: Option<String>,
+        target_addr: SocketAddr,
+        enable_compression: bool,
+        chunk_size: u32,
+    ) -> Result<()> {
+        let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
+
+        let metadata = tokio::fs::metadata(&file_path).await?;
+        let file_size = metadata.len();
+
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+
+        let request = TransferRequest {
+            file_id: {
+                let mut h = Sha256::new();
+                h.update(file_name.as_bytes());
+                h.update(&file_size.to_le_bytes());
+                let r = h.finalize();
+                r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            },
+            file_name: file_name.clone(),
+            relative_path,
+            file_size,
+            chunk_size,
+            device_id: String::new(),
+            password_hash: None,
+        };
+
+        let stream = TcpStream::connect(target_addr).await?;
+        stream.set_nodelay(true)?;
+        let (mut read_half, mut write_half) = stream.into_split();
+
+        Self::write_msg(&mut write_half, &Message::TransferRequest(request)).await?;
+
+        let resume_from = {
+            let response = Self::read_msg(&mut read_half).await?;
+            if let Message::TransferResponse(resp) = response {
+                if !resp.accepted {
+                    return Err(anyhow::anyhow!("Transfer rejected by receiver"));
+                }
+                resp.resume_from_chunk.unwrap_or(0)
+            } else {
+                0
+            }
+        };
+
+        let mut file = tokio::fs::File::open(&file_path).await?;
+        let mut hasher = Sha256::new();
+
+        if resume_from > 0 {
+            let skip_bytes = resume_from as u64 * chunk_size as u64;
+            let mut remaining_skip = skip_bytes;
+            let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
+            while remaining_skip > 0 {
+                let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
+                file.read_exact(&mut skip_buf[..read_size]).await?;
+                hasher.update(&skip_buf[..read_size]);
+                remaining_skip -= read_size as u64;
+            }
+        }
+
+        for chunk_index in resume_from..total_chunks {
+            if self.cancelled.read().await.contains(folder_id) {
+                return Ok(());
+            }
+
+            loop {
+                if !self.paused.read().await.contains(folder_id) { break; }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            let offset = chunk_index as u64 * chunk_size as u64;
+            let remaining = file_size - offset;
+            let read_size = (chunk_size as u64).min(remaining) as usize;
+            let mut buffer = vec![0u8; read_size];
+            file.read_exact(&mut buffer).await?;
+
+            hasher.update(&buffer);
+
+            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+                match crate::compression::Compressor::compress(&buffer) {
+                    Ok(c) if c.len() < buffer.len() => (c, true),
+                    _ => (buffer, false),
+                }
+            } else {
+                (buffer, false)
+            };
+
+            let chunk_bytes_len = send_data.len() as u64;
+            Self::write_chunk_raw(&mut write_half, chunk_index, compressed, &send_data).await?;
+            self.progress_tracker.update_progress(folder_id, chunk_bytes_len).await;
+
+            if speed_limit_bytes_per_sec > 0 {
+                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+                tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
+            }
+        }
+
+        let hash_result = hasher.finalize();
+        let mut file_hash = [0u8; 32];
+        file_hash.copy_from_slice(&hash_result);
+
+        Self::write_msg(&mut write_half, &Message::TransferComplete(TransferComplete {
+            file_id: String::new(),
+            file_hash,
+        })).await?;
+
+        match Self::read_msg(&mut read_half).await? {
+            Message::TransferComplete(_) => {}
+            Message::TransferError(e) => {
+                return Err(anyhow::anyhow!("Receiver error: {}", e.error));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    async fn do_send_file_iroh(
+        &self,
+        file_path: PathBuf,
+        relative_path: Option<String>,
+        endpoint_addr: iroh::EndpointAddr,
+        enable_compression: bool,
+    ) -> Result<String> {
+        let chunk_size = *self.chunk_size.read().await;
+        let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
+
+        let metadata = tokio::fs::metadata(&file_path).await?;
+        let file_size = metadata.len();
+
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let file_id = {
+            let mut h = Sha256::new();
+            h.update(file_name.as_bytes());
+            h.update(&file_size.to_le_bytes());
+            let r = h.finalize();
+            r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        };
+
+        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+
+        self.progress_tracker
+            .register_queued(
+                file_id.clone(),
+                file_name.clone(),
+                file_size,
+                total_chunks,
+                "send".to_string(),
+            )
+            .await;
+
+        let request = TransferRequest {
+            file_id: file_id.clone(),
+            file_name: file_name.clone(),
+            relative_path,
+            file_size,
+            chunk_size,
+            device_id: String::new(),
+            password_hash: None,
+        };
+
+        let conn = match self.iroh_get_or_connect(endpoint_addr).await {
             Ok(c) => c,
             Err(e) => {
                 self.progress_tracker.remove_progress(&file_id).await;
@@ -1017,7 +1080,7 @@ impl TransferService {
         let (mut send, mut recv) = match conn.open_bi().await {
             Ok(s) => s,
             Err(e) => {
-                self.progress_tracker.set_error(&file_id, format!("QUIC stream failed: {}", e)).await;
+                self.progress_tracker.set_error(&file_id, format!("iroh stream failed: {}", e)).await;
                 return Err(e.into());
             }
         };
@@ -1138,7 +1201,7 @@ impl TransferService {
             .map(|p| p.start_time.elapsed().as_secs())
             .unwrap_or(0);
         self.progress_tracker.remove_progress(&file_id).await;
-        info!("File transfer completed: {}", file_id);
+        info!("iroh file transfer completed: {}", file_id);
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1159,12 +1222,12 @@ impl TransferService {
         Ok(file_id)
     }
 
-    async fn send_file_for_folder(
+    async fn send_file_for_folder_iroh(
         &self,
         folder_id: &str,
         file_path: PathBuf,
         relative_path: Option<String>,
-        target_addr: SocketAddr,
+        endpoint_addr: iroh::EndpointAddr,
         enable_compression: bool,
         chunk_size: u32,
     ) -> Result<()> {
@@ -1179,18 +1242,16 @@ impl TransferService {
             .unwrap_or("unknown")
             .to_string();
 
-        let file_id = {
-            let mut h = Sha256::new();
-            h.update(file_name.as_bytes());
-            h.update(&file_size.to_le_bytes());
-            let r = h.finalize();
-            r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
-        };
-
         let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
 
         let request = TransferRequest {
-            file_id: file_id.clone(),
+            file_id: {
+                let mut h = Sha256::new();
+                h.update(file_name.as_bytes());
+                h.update(&file_size.to_le_bytes());
+                let r = h.finalize();
+                r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            },
             file_name: file_name.clone(),
             relative_path,
             file_size,
@@ -1199,7 +1260,7 @@ impl TransferService {
             password_hash: None,
         };
 
-        let conn = self.get_or_connect(target_addr).await?;
+        let conn = self.iroh_get_or_connect(endpoint_addr).await?;
         let (mut send, mut recv) = conn.open_bi().await?;
 
         Self::write_msg(&mut send, &Message::TransferRequest(request)).await?;
@@ -1273,7 +1334,7 @@ impl TransferService {
         file_hash.copy_from_slice(&hash_result);
 
         Self::write_msg(&mut send, &Message::TransferComplete(TransferComplete {
-            file_id: file_id.clone(),
+            file_id: String::new(),
             file_hash,
         })).await?;
 
@@ -1322,184 +1383,16 @@ impl TransferService {
             timestamp,
         };
 
-        let conn = match self.get_or_connect(target_addr).await {
-            Ok(c) => c,
-            Err(e) => return Err(e),
-        };
-        let (mut send, mut recv) = conn.open_bi().await?;
-        Self::write_msg(&mut send, &Message::TextMessage(msg)).await?;
+        let stream = TcpStream::connect(target_addr).await?;
+        stream.set_nodelay(true)?;
+        let (mut read_half, mut write_half) = stream.into_split();
+        Self::write_msg(&mut write_half, &Message::TextMessage(msg)).await?;
 
-        match Self::read_msg(&mut recv).await? {
+        match Self::read_msg(&mut read_half).await? {
             Message::TextAck(_) => {}
             _ => {}
         }
 
-        Ok(())
-    }
-
-    pub async fn send_file_via_relay(
-        &self,
-        file_path: PathBuf,
-        relay_addr: SocketAddr,
-        enable_compression: bool,
-    ) -> Result<String> {
-        let chunk_size = *self.chunk_size.read().await;
-        let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
-        let metadata = tokio::fs::metadata(&file_path).await?;
-        let file_size = metadata.len();
-        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
-
-        let file_id = {
-            let mut h = Sha256::new();
-            h.update(file_name.as_bytes());
-            h.update(&file_size.to_le_bytes());
-            let r = h.finalize();
-            r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
-        };
-
-        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
-
-        self.progress_tracker.register_queued(file_id.clone(), file_name.clone(), file_size, total_chunks, "send".to_string()).await;
-
-        let request = TransferRequest {
-            file_id: file_id.clone(), file_name: file_name.clone(), relative_path: None,
-            file_size, chunk_size, device_id: String::new(), password_hash: None,
-        };
-
-        let mut stream = match TcpStream::connect(relay_addr).await {
-            Ok(s) => s,
-            Err(e) => {
-                self.progress_tracker.set_error(&file_id, format!("Relay connection failed: {}", e)).await;
-                return Err(e.into());
-            }
-        };
-        stream.set_nodelay(true)?;
-
-        Self::write_msg_tcp(&mut stream, &Message::TransferRequest(request)).await?;
-
-        let resume_from = match Self::read_msg_tcp(&mut stream).await? {
-            Message::TransferResponse(resp) => {
-                if !resp.accepted {
-                    self.progress_tracker.remove_progress(&file_id).await;
-                    return Err(anyhow::anyhow!("Transfer rejected by receiver"));
-                }
-                resp.resume_from_chunk.unwrap_or(0)
-            }
-            _ => 0,
-        };
-
-        let _permit = {
-            let sem = self.semaphore.read().await.clone();
-            sem.acquire_owned().await.map_err(|_| anyhow::anyhow!("Transfer semaphore closed"))?
-        };
-        self.progress_tracker.set_active(&file_id).await;
-
-        let mut file = tokio::fs::File::open(&file_path).await?;
-        let mut hasher = Sha256::new();
-
-        if resume_from > 0 {
-            let mut remaining_skip = resume_from as u64 * chunk_size as u64;
-            let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
-            while remaining_skip > 0 {
-                let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
-                file.read_exact(&mut skip_buf[..read_size]).await?;
-                hasher.update(&skip_buf[..read_size]);
-                remaining_skip -= read_size as u64;
-            }
-        }
-
-        for chunk_index in resume_from..total_chunks {
-            if self.cancelled.read().await.contains(&file_id) {
-                self.progress_tracker.remove_progress(&file_id).await;
-                self.cancelled.write().await.remove(&file_id);
-                return Ok(file_id);
-            }
-            loop { if !self.paused.read().await.contains(&file_id) { break; } tokio::time::sleep(Duration::from_millis(200)).await; }
-
-            let offset = chunk_index as u64 * chunk_size as u64;
-            let remaining = file_size - offset;
-            let read_size = (chunk_size as u64).min(remaining) as usize;
-            let mut buffer = vec![0u8; read_size];
-            file.read_exact(&mut buffer).await?;
-            hasher.update(&buffer);
-
-            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
-                match crate::compression::Compressor::compress(&buffer) {
-                    Ok(c) if c.len() < buffer.len() => (c, true),
-                    _ => (buffer, false),
-                }
-            } else { (buffer, false) };
-
-            let chunk_bytes_len = send_data.len() as u64;
-            Self::write_chunk_raw_tcp(&mut stream, chunk_index, compressed, &send_data).await?;
-            self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
-
-            if speed_limit_bytes_per_sec > 0 {
-                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
-                tokio::time::sleep(Duration::from_micros(delay_micros)).await;
-            }
-        }
-
-        let hash_result = hasher.finalize();
-        let mut file_hash = [0u8; 32];
-        file_hash.copy_from_slice(&hash_result);
-
-        Self::write_msg_tcp(&mut stream, &Message::TransferComplete(TransferComplete { file_id: file_id.clone(), file_hash })).await?;
-
-        match Self::read_msg_tcp(&mut stream).await? {
-            Message::TransferComplete(_) => {}
-            Message::TransferError(e) => { self.progress_tracker.remove_progress(&file_id).await; return Err(anyhow::anyhow!("Receiver error: {}", e.error)); }
-            _ => {}
-        }
-
-        let elapsed = self.progress_tracker.get_progress(&file_id).await.map(|p| p.start_time.elapsed().as_secs()).unwrap_or(0);
-        self.progress_tracker.remove_progress(&file_id).await;
-        info!("Relay file transfer completed: {}", file_id);
-
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        let _ = self.history_store.add_record(TransferRecord {
-            id: Uuid::new_v4().to_string(), file_name, file_size,
-            direction: "send".to_string(), status: "completed".to_string(), error: None, timestamp: ts, elapsed_secs: elapsed,
-            save_path: Some(file_path.to_string_lossy().to_string()),
-        }).await;
-
-        Ok(file_id)
-    }
-
-    pub async fn send_folder_via_relay(
-        &self,
-        folder_path: PathBuf,
-        relay_addr: SocketAddr,
-        enable_compression: bool,
-    ) -> Result<()> {
-        let folder_name = folder_path.file_name().and_then(|n| n.to_str()).unwrap_or("folder").to_string();
-        let entries = super::directory::scan_directory(&folder_path).await?;
-        let file_entries: Vec<_> = entries.into_iter().filter(|e| !e.is_dir).collect();
-        if file_entries.is_empty() { return Ok(()); }
-
-        let chunk_size = *self.chunk_size.read().await;
-        let total_size: u64 = file_entries.iter().map(|e| e.size).sum();
-        let total_chunks: u32 = file_entries.iter().map(|e| ((e.size + chunk_size as u64 - 1) / chunk_size as u64) as u32).sum();
-        let folder_id = Uuid::new_v4().to_string();
-        self.progress_tracker.register_queued(folder_id.clone(), format!("{}/", folder_name), total_size, total_chunks, "send".to_string()).await;
-
-        let _permit = {
-            let sem = self.semaphore.read().await.clone();
-            sem.acquire_owned().await.map_err(|_| anyhow::anyhow!("Transfer semaphore closed"))?
-        };
-        self.progress_tracker.set_active(&folder_id).await;
-
-        for entry in &file_entries {
-            if self.cancelled.read().await.contains(&folder_id) { break; }
-            let abs_path = folder_path.join(&entry.relative_path);
-            let rel = format!("{}/{}", folder_name, entry.relative_path.to_string_lossy().replace('\\', "/"));
-            if let Err(e) = self.send_file_via_relay(abs_path, relay_addr, enable_compression).await {
-                warn!("Failed to send file in folder via relay: {}", e);
-            }
-        }
-
-        self.progress_tracker.remove_progress(&folder_id).await;
-        self.cancelled.write().await.remove(&folder_id);
         Ok(())
     }
 
@@ -1582,52 +1475,8 @@ impl TransferService {
         self.transfer_port
     }
 
-    pub async fn public_addr(&self) -> Option<String> {
-        self.public_addr.read().await.clone()
-    }
-
-    pub async fn update_public_addr(&self, addr: Option<String>) {
-        *self.public_addr.write().await = addr;
-    }
-
-    pub async fn refresh_public_addr(&self) -> Result<()> {
-        info!("Starting STUN address refresh...");
-        let stun_client = crate::stun::StunClient::new();
-
-        let temp_socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to create UDP socket for STUN: {}", e);
-                return Err(e.into());
-            }
-        };
-
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            stun_client.get_public_address_with_socket(&temp_socket),
-        ).await {
-            Ok(Ok(addr)) => {
-                let public_ip = addr.ip();
-                let addr_str = format!("{}:{}", public_ip, self.transfer_port);
-                info!("STUN refresh succeeded: public address = {}", addr_str);
-                *self.public_addr.write().await = Some(addr_str);
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                error!("STUN refresh failed: {}", e);
-                Err(e)
-            }
-            Err(_) => {
-                error!("STUN refresh timed out after 5 seconds");
-                Err(anyhow::anyhow!("STUN refresh timed out"))
-            }
-        }
-    }
-
-    pub fn nat_type_str(&self) -> String {
-        self.nat_type.try_read()
-            .map(|nt| nt.as_str().to_string())
-            .unwrap_or_else(|_| "cone".to_string())
+    pub fn iroh_manager(&self) -> Arc<IrohManager> {
+        self.iroh_manager.clone()
     }
 
     pub fn task_queue(&self) -> Arc<TaskQueue> {
@@ -1647,11 +1496,9 @@ impl Clone for TransferService {
     fn clone(&self) -> Self {
         Self {
             tcp_listener: self.tcp_listener.clone(),
-            quic_endpoint: self.quic_endpoint.clone(),
+            iroh_manager: self.iroh_manager.clone(),
             transfer_port: self.transfer_port,
-            public_addr: self.public_addr.clone(),
-            nat_type: self.nat_type.clone(),
-            connection_cache: self.connection_cache.clone(),
+            iroh_conn_cache: self.iroh_conn_cache.clone(),
             task_queue: self.task_queue.clone(),
             progress_tracker: self.progress_tracker.clone(),
             cancelled: self.cancelled.clone(),

@@ -1,3 +1,4 @@
+pub mod iroh_net;
 pub mod config;
 pub mod discovery;
 pub mod transfer;
@@ -18,5 +19,6 @@ pub use compression::Compressor;
 pub use tls::TlsManager;
 pub use stun::{StunClient, NatType};
 pub use hole_punch::{UdpHolePuncher, HolePunchRequest, HolePunchResponse};
-pub use message_store::{MessageStore, ChatMessage};
+pub use message_store::{MessageStore, ChatMessage, ConversationDelta};
 pub use signal_client::{SignalClient, FriendInfo, SignalStatus};
+pub use iroh_net::IrohManager;

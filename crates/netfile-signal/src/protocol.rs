@@ -9,6 +9,8 @@ pub struct FriendInfo {
     pub instance_name: String,
     pub online: bool,
     pub transfer_addr: Option<String>,
+    #[serde(default)]
+    pub iroh_addr: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -33,25 +35,16 @@ pub enum C2sMsg {
     AcceptInvite {
         code: String,
     },
-    RequestPunch {
-        target_device_id: String,
-        #[serde(default)]
-        nat_type: String,
-    },
-    PunchReady {
-        target_device_id: String,
-    },
     RelayMessage {
         to_device_id: String,
         content: String,
         timestamp: u64,
     },
-    RequestRelay {
-        target_device_id: String,
-        session_id: String,
-    },
     UpdateTransferAddr {
         transfer_addr: String,
+    },
+    UpdateIrohAddr {
+        iroh_addr: String,
     },
     Heartbeat,
 }
@@ -76,26 +69,11 @@ pub enum S2cMsg {
         device_id: String,
         instance_name: String,
         transfer_addr: String,
+        #[serde(default)]
+        iroh_addr: Option<String>,
     },
     FriendOffline {
         device_id: String,
-    },
-    PunchCoordinate {
-        peer_addr: String,
-        peer_device_id: String,
-        #[serde(default)]
-        peer_nat_type: String,
-    },
-    PunchRequest {
-        initiator_device_id: String,
-        initiator_addr: String,
-        #[serde(default)]
-        initiator_nat_type: String,
-    },
-    PunchStart {
-        peer_addr: String,
-        peer_device_id: String,
-        peer_nat_type: String,
     },
     RelayedMessage {
         from_device_id: String,
@@ -105,18 +83,6 @@ pub enum S2cMsg {
     },
     OfflineMessages {
         messages: Vec<OfflineMsg>,
-    },
-    RelaySession {
-        session_id: String,
-        relay_port: u16,
-    },
-    IncomingRelay {
-        session_id: String,
-        relay_port: u16,
-    },
-    RelayUnavailable {
-        session_id: String,
-        reason: String,
     },
     Error {
         message: String,

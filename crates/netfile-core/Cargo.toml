@@ -27,6 +27,8 @@ quinn.workspace = true
 hostname = "0.4"
 dirs = "5.0"
 crc32fast = "1.4"
+iroh.workspace = true
+rand = "0.9"
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

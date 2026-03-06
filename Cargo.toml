@@ -37,3 +37,8 @@ ratatui = "0.29"
 crossterm = "0.28"
 bytes = "1.5"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls"] }
+iroh = "0.96.1"
+windows = { version = "0.62.2", features = ["Win32_NetworkManagement_IpHelper", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_Wmi"] }
+
+[patch.crates-io]
+wmi = { path = "vendor/wmi" }

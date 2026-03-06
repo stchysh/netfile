@@ -191,6 +191,25 @@
   background-color: #d5dbdb;
 }
 
+.reset-button {
+  flex-shrink: 0;
+  padding: 0.75rem 1rem;
+  background-color: #ecf0f1;
+  color: #7f8c8d;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  white-space: nowrap;
+}
+
+.reset-button:hover {
+  background-color: #d5dbdb;
+  color: #2c3e50;
+}
+
 .name-input-row {
   display: flex;
   gap: 0.5rem;

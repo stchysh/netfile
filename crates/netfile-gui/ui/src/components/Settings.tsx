@@ -282,6 +282,13 @@ function Settings({ onClose }: Props) {
                 <button className="browse-button" onClick={handleBrowseDownloadDir}>
                   浏览
                 </button>
+                <button
+                  className="reset-button"
+                  onClick={() => setConfig({ ...config, transfer: { ...config.transfer, download_dir: '' } })}
+                  title="重置为默认目录"
+                >
+                  重置
+                </button>
               </div>
             </div>
             <div className="form-group">

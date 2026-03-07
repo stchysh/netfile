@@ -251,8 +251,9 @@ impl TransferService {
         transfer_method: &str,
     ) -> Result<()> {
         info!(
-            "Received transfer request: {} ({} bytes)",
-            request.file_name, request.file_size
+            "[recv/{}] received request: file_id={} name={:?} size={} chunks={}",
+            transfer_method, request.file_id, request.file_name, request.file_size,
+            (request.file_size + request.chunk_size as u64 - 1) / request.chunk_size as u64
         );
 
         let file_id = request.file_id.clone();
@@ -270,6 +271,7 @@ impl TransferService {
             let accepted = rx.await.unwrap_or(false);
             self.progress_tracker.remove_progress(&progress_id).await;
             if !accepted {
+                info!("[recv/{}] user rejected transfer: {}", transfer_method, file_id);
                 let _ = Self::write_msg(send, &Message::TransferResponse(TransferResponse {
                     file_id: file_id.clone(),
                     accepted: false,
@@ -278,6 +280,7 @@ impl TransferService {
                 })).await;
                 return Ok(());
             }
+            info!("[recv/{}] user accepted transfer: {}", transfer_method, file_id);
         }
 
         let download_dir = self.download_dir.read().await.clone();
@@ -289,6 +292,9 @@ impl TransferService {
         .await?;
 
         let resume_from_chunk = receiver.resume_from_chunk();
+        if resume_from_chunk > 0 {
+            info!("[recv/{}] resuming from chunk {} for {}", transfer_method, resume_from_chunk, file_id);
+        }
 
         self.progress_tracker
             .start_transfer(
@@ -371,7 +377,7 @@ impl TransferService {
 
         match receiver.finalize(tc.file_hash).await {
             Ok(()) => {
-                info!("Transfer completed for file: {}", file_id);
+                info!("[recv/{}] completed file_id={} name={:?} size={}", transfer_method, file_id, request.file_name, request.file_size);
                 if let Err(e) = Self::write_msg(send, &Message::TransferComplete(TransferComplete {
                     file_id: file_id.clone(),
                     file_hash: tc.file_hash,
@@ -381,6 +387,7 @@ impl TransferService {
                 }
             }
             Err(e) => {
+                error!("[recv/{}] finalize failed for {}: {}", transfer_method, file_id, e);
                 let _ = Self::write_msg(send, &Message::TransferError(TransferError {
                     file_id: file_id.clone(),
                     error: e.to_string(),
@@ -507,6 +514,11 @@ impl TransferService {
             .await;
         self.progress_tracker.set_transfer_method(&folder_id, METHOD).await;
 
+        info!(
+            "[send/lan/folder] start folder_id={} name={:?} files={} total_size={} target={}",
+            folder_id, folder_name, file_entries.len(), total_size, target_addr
+        );
+
         let _permit = {
             let sem = self.semaphore.read().await.clone();
             match sem.acquire_owned().await {
@@ -522,6 +534,7 @@ impl TransferService {
 
         for entry in &file_entries {
             if self.cancelled.read().await.contains(&folder_id) {
+                info!("[send/lan/folder] cancelled: {}", folder_id);
                 break;
             }
 
@@ -537,13 +550,14 @@ impl TransferService {
                 .send_file_for_folder(&folder_id, abs_path, Some(rel), target_addr, enable_compression, chunk_size)
                 .await
             {
-                warn!("Failed to send file in folder {}: {}", current_name, e);
+                warn!("[send/lan/folder] failed to send file {} in folder {}: {}", current_name, folder_id, e);
             }
         }
 
         self.progress_tracker.remove_progress(&folder_id).await;
         self.cancelled.write().await.remove(&folder_id);
 
+        info!("[send/lan/folder] completed folder_id={} name={:?}", folder_id, folder_name);
         Ok(())
     }
 
@@ -607,6 +621,11 @@ impl TransferService {
             .await;
         self.progress_tracker.set_transfer_method(&folder_id, METHOD).await;
 
+        info!(
+            "[send/iroh/folder] start folder_id={} name={:?} files={} total_size={}",
+            folder_id, folder_name, file_entries.len(), total_size
+        );
+
         let _permit = {
             let sem = self.semaphore.read().await.clone();
             match sem.acquire_owned().await {
@@ -622,6 +641,7 @@ impl TransferService {
 
         for entry in &file_entries {
             if self.cancelled.read().await.contains(&folder_id) {
+                info!("[send/iroh/folder] cancelled: {}", folder_id);
                 break;
             }
 
@@ -637,13 +657,14 @@ impl TransferService {
                 .send_file_for_folder_iroh(&folder_id, abs_path, Some(rel), endpoint_addr.clone(), enable_compression, chunk_size)
                 .await
             {
-                warn!("Failed to send file in folder via iroh {}: {}", current_name, e);
+                warn!("[send/iroh/folder] failed to send file {} in folder {}: {}", current_name, folder_id, e);
             }
         }
 
         self.progress_tracker.remove_progress(&folder_id).await;
         self.cancelled.write().await.remove(&folder_id);
 
+        info!("[send/iroh/folder] completed folder_id={} name={:?}", folder_id, folder_name);
         Ok(())
     }
 
@@ -688,7 +709,13 @@ impl TransferService {
         let chunk_size = *self.chunk_size.read().await;
         let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
 
-        let metadata = tokio::fs::metadata(&file_path).await?;
+        let metadata = match tokio::fs::metadata(&file_path).await {
+            Ok(m) => m,
+            Err(e) => {
+                error!("Failed to read file metadata {:?}: {}", file_path, e);
+                return Err(e.into());
+            }
+        };
         let file_size = metadata.len();
 
         let file_name = file_path
@@ -718,6 +745,11 @@ impl TransferService {
             .await;
         self.progress_tracker.set_transfer_method(&file_id, METHOD).await;
 
+        info!(
+            "[send/lan] start file_id={} name={:?} size={} target={} chunks={}",
+            file_id, file_name, file_size, target_addr, total_chunks
+        );
+
         let request = TransferRequest {
             file_id: file_id.clone(),
             file_name: file_name.clone(),
@@ -729,8 +761,12 @@ impl TransferService {
         };
 
         let stream = match TcpStream::connect(target_addr).await {
-            Ok(s) => s,
+            Ok(s) => {
+                debug!("[send/lan] TCP connected to {}", target_addr);
+                s
+            }
             Err(e) => {
+                error!("[send/lan] TCP connect to {} failed: {}", target_addr, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e.into());
             }
@@ -739,6 +775,7 @@ impl TransferService {
         let (mut read_half, mut write_half) = stream.into_split();
 
         if let Err(e) = Self::write_msg(&mut write_half, &Message::TransferRequest(request)).await {
+            error!("[send/lan] failed to send TransferRequest for {}: {}", file_id, e);
             self.progress_tracker.set_error(&file_id, format!("Send request failed: {}", e)).await;
             return Err(e);
         }
@@ -747,16 +784,24 @@ impl TransferService {
             let response = match Self::read_msg(&mut read_half).await {
                 Ok(r) => r,
                 Err(e) => {
+                    error!("[send/lan] failed to read TransferResponse for {}: {}", file_id, e);
                     self.progress_tracker.remove_progress(&file_id).await;
                     return Err(e);
                 }
             };
             if let Message::TransferResponse(resp) = response {
                 if !resp.accepted {
+                    warn!("[send/lan] transfer rejected by receiver: {}", file_id);
                     self.progress_tracker.remove_progress(&file_id).await;
                     return Err(anyhow::anyhow!("Transfer rejected by receiver"));
                 }
-                resp.resume_from_chunk.unwrap_or(0)
+                let resume = resp.resume_from_chunk.unwrap_or(0);
+                if resume > 0 {
+                    info!("[send/lan] resuming from chunk {} for {}", resume, file_id);
+                } else {
+                    debug!("[send/lan] transfer accepted, starting from chunk 0 for {}", file_id);
+                }
+                resume
             } else {
                 0
             }
@@ -817,6 +862,7 @@ impl TransferService {
             let read_size = (chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0u8; read_size];
             if let Err(e) = file.read_exact(&mut buffer).await {
+                error!("[send/lan] file read error at chunk {} for {}: {}", chunk_index, file_id, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e.into());
             }
@@ -834,6 +880,7 @@ impl TransferService {
 
             let chunk_bytes_len = send_data.len() as u64;
             if let Err(e) = Self::write_chunk_raw(&mut write_half, chunk_index, compressed, &send_data).await {
+                error!("[send/lan] chunk write error at chunk {} for {}: {}", chunk_index, file_id, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e);
             }
@@ -853,6 +900,7 @@ impl TransferService {
             file_id: file_id.clone(),
             file_hash,
         })).await {
+            error!("[send/lan] failed to send TransferComplete for {}: {}", file_id, e);
             self.progress_tracker.remove_progress(&file_id).await;
             return Err(e);
         }
@@ -860,11 +908,13 @@ impl TransferService {
         match Self::read_msg(&mut read_half).await {
             Ok(Message::TransferComplete(_)) => {}
             Ok(Message::TransferError(e)) => {
+                error!("[send/lan] receiver reported error for {}: {}", file_id, e.error);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(anyhow::anyhow!("Receiver error: {}", e.error));
             }
             Ok(_) => {}
             Err(e) => {
+                error!("[send/lan] failed to read final ack for {}: {}", file_id, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e);
             }
@@ -874,7 +924,7 @@ impl TransferService {
             .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
             .unwrap_or((0, None));
         self.progress_tracker.remove_progress(&file_id).await;
-        info!("File transfer completed: {}", file_id);
+        info!("[send/lan] completed file_id={} name={:?} size={} elapsed={}s", file_id, file_name, file_size, elapsed);
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1065,6 +1115,11 @@ impl TransferService {
             .await;
         self.progress_tracker.set_transfer_method(&file_id, METHOD).await;
 
+        info!(
+            "[send/iroh] start file_id={} name={:?} size={} chunks={}",
+            file_id, file_name, file_size, total_chunks
+        );
+
         let request = TransferRequest {
             file_id: file_id.clone(),
             file_name: file_name.clone(),
@@ -1078,20 +1133,26 @@ impl TransferService {
         let conn = match self.iroh_get_or_connect(endpoint_addr).await {
             Ok(c) => c,
             Err(e) => {
+                error!("[send/iroh] failed to connect iroh endpoint for {}: {}", file_id, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e);
             }
         };
 
         let (mut send, mut recv) = match conn.open_bi().await {
-            Ok(s) => s,
+            Ok(s) => {
+                debug!("[send/iroh] opened bi stream for {}", file_id);
+                s
+            }
             Err(e) => {
+                error!("[send/iroh] failed to open bi stream for {}: {}", file_id, e);
                 self.progress_tracker.set_error(&file_id, format!("iroh stream failed: {}", e)).await;
                 return Err(e.into());
             }
         };
 
         if let Err(e) = Self::write_msg(&mut send, &Message::TransferRequest(request)).await {
+            error!("[send/iroh] failed to send TransferRequest for {}: {}", file_id, e);
             self.progress_tracker.set_error(&file_id, format!("Send request failed: {}", e)).await;
             return Err(e);
         }
@@ -1100,16 +1161,24 @@ impl TransferService {
             let response = match Self::read_msg(&mut recv).await {
                 Ok(r) => r,
                 Err(e) => {
+                    error!("[send/iroh] failed to read TransferResponse for {}: {}", file_id, e);
                     self.progress_tracker.remove_progress(&file_id).await;
                     return Err(e);
                 }
             };
             if let Message::TransferResponse(resp) = response {
                 if !resp.accepted {
+                    warn!("[send/iroh] transfer rejected by receiver: {}", file_id);
                     self.progress_tracker.remove_progress(&file_id).await;
                     return Err(anyhow::anyhow!("Transfer rejected by receiver"));
                 }
-                resp.resume_from_chunk.unwrap_or(0)
+                let resume = resp.resume_from_chunk.unwrap_or(0);
+                if resume > 0 {
+                    info!("[send/iroh] resuming from chunk {} for {}", resume, file_id);
+                } else {
+                    debug!("[send/iroh] transfer accepted, starting from chunk 0 for {}", file_id);
+                }
+                resume
             } else {
                 0
             }
@@ -1170,6 +1239,7 @@ impl TransferService {
             let read_size = (chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0u8; read_size];
             if let Err(e) = file.read_exact(&mut buffer).await {
+                error!("[send/iroh] file read error at chunk {} for {}: {}", chunk_index, file_id, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e.into());
             }
@@ -1187,6 +1257,7 @@ impl TransferService {
 
             let chunk_bytes_len = send_data.len() as u64;
             if let Err(e) = Self::write_chunk_raw(&mut send, chunk_index, compressed, &send_data).await {
+                error!("[send/iroh] chunk write error at chunk {} for {}: {}", chunk_index, file_id, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e);
             }
@@ -1206,6 +1277,7 @@ impl TransferService {
             file_id: file_id.clone(),
             file_hash,
         })).await {
+            error!("[send/iroh] failed to send TransferComplete for {}: {}", file_id, e);
             self.progress_tracker.remove_progress(&file_id).await;
             return Err(e);
         }
@@ -1213,11 +1285,13 @@ impl TransferService {
         match Self::read_msg(&mut recv).await {
             Ok(Message::TransferComplete(_)) => {}
             Ok(Message::TransferError(e)) => {
+                error!("[send/iroh] receiver reported error for {}: {}", file_id, e.error);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(anyhow::anyhow!("Receiver error: {}", e.error));
             }
             Ok(_) => {}
             Err(e) => {
+                error!("[send/iroh] failed to read final ack for {}: {}", file_id, e);
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(e);
             }
@@ -1229,7 +1303,7 @@ impl TransferService {
             .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
             .unwrap_or((0, None));
         self.progress_tracker.remove_progress(&file_id).await;
-        info!("iroh file transfer completed: {}", file_id);
+        info!("[send/iroh] completed file_id={} name={:?} size={} elapsed={}s", file_id, file_name, file_size, elapsed);
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

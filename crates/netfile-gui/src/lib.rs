@@ -120,10 +120,14 @@ async fn send_file(
     let path_for_log = path.display().to_string();
 
     tokio::spawn(async move {
+        tracing::info!("send_file dispatch: path={:?} lan_addr={:?} peer_device_id={:?} compression={}", path_for_log, lan_addr, peer_device_id, compression);
         let mut direct_ok = false;
 
         if let Some(candidate) = lan_addr {
+            tracing::info!("trying LAN transfer to {}", candidate);
             direct_ok = try_direct_transfer(&service, &path, candidate, compression, &path_for_log).await;
+        } else {
+            tracing::info!("no LAN addr available, skipping direct transfer");
         }
 
         if !direct_ok {
@@ -131,16 +135,21 @@ async fn send_file(
                 let sc_guard = signal_client.read().await;
                 if let Some(sc) = sc_guard.as_ref() {
                     if let Some(iroh_addr_json) = sc.get_peer_iroh_addr(device_id).await {
+                        tracing::info!("trying iroh transfer for peer_device_id={}", device_id);
                         direct_ok = try_iroh_transfer(&service, &path, &iroh_addr_json, compression, &path_for_log).await;
                     } else {
-                        tracing::warn!("no iroh_addr for peer_device_id={}", device_id);
+                        tracing::warn!("no iroh_addr for peer_device_id={}, cannot fallback to iroh", device_id);
                     }
+                } else {
+                    tracing::warn!("signal client not connected, cannot get iroh_addr for peer_device_id={:?}", peer_device_id);
                 }
+            } else {
+                tracing::warn!("no peer_device_id provided, cannot try iroh fallback");
             }
         }
 
         if !direct_ok {
-            tracing::error!("transfer failed: no valid path for {}", path_for_log);
+            tracing::error!("all transfer paths failed for {}", path_for_log);
         }
     });
     Ok(())

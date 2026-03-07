@@ -705,11 +705,17 @@ pub fn run() {
                         config.network.signal_server_addr.clone(),
                         message_store.clone(),
                     );
-                    if let Ok(()) = sc.connect().await {
-                        let handle = spawn_iroh_addr_watcher(sc.clone(), iroh_manager.clone());
-                        *iroh_watcher.lock().await = Some(handle);
-                        *signal_client.write().await = Some(sc);
-                    }
+                    let sc_clone = sc.clone();
+                    let iroh_manager_clone = iroh_manager.clone();
+                    let signal_client_clone = signal_client.clone();
+                    let iroh_watcher_clone = iroh_watcher.clone();
+                    tokio::spawn(async move {
+                        if let Ok(()) = sc_clone.connect().await {
+                            let handle = spawn_iroh_addr_watcher(sc_clone.clone(), iroh_manager_clone);
+                            *iroh_watcher_clone.lock().await = Some(handle);
+                            *signal_client_clone.write().await = Some(sc_clone);
+                        }
+                    });
                 }
 
                 app.manage(AppState {

@@ -46,6 +46,8 @@ pub struct TransferConfig {
     pub speed_limit_mbps: u32,
     #[serde(default)]
     pub require_confirmation: bool,
+    #[serde(default = "default_iroh_stream_count")]
+    pub iroh_stream_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +122,10 @@ fn default_max_concurrent() -> usize {
     3
 }
 
+fn default_iroh_stream_count() -> u32 {
+    4
+}
+
 fn default_require_auth() -> bool {
     true
 }
@@ -165,6 +171,7 @@ impl Default for TransferConfig {
             download_dir: String::new(),
             speed_limit_mbps: 0,
             require_confirmation: true,
+            iroh_stream_count: default_iroh_stream_count(),
         }
     }
 }

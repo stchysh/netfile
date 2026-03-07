@@ -33,6 +33,7 @@ pub struct TransferService {
     chunk_size: Arc<RwLock<u32>>,
     enable_compression: Arc<RwLock<bool>>,
     speed_limit_bytes_per_sec: Arc<RwLock<u64>>,
+    iroh_stream_count: Arc<RwLock<u32>>,
     message_store: Arc<MessageStore>,
     history_store: Arc<HistoryStore>,
     semaphore: Arc<RwLock<Arc<Semaphore>>>,
@@ -88,6 +89,7 @@ impl TransferService {
             chunk_size: Arc::new(RwLock::new(chunk_size)),
             enable_compression: Arc::new(RwLock::new(enable_compression)),
             speed_limit_bytes_per_sec: Arc::new(RwLock::new(speed_limit_bytes_per_sec)),
+            iroh_stream_count: Arc::new(RwLock::new(4)),
             message_store,
             history_store,
             semaphore,
@@ -1479,8 +1481,8 @@ impl TransferService {
         };
 
         const MULTI_STREAM_THRESHOLD: u64 = 8 * 1024 * 1024;
-        const MULTI_STREAM_COUNT: u32 = 4;
-        let n_streams = if file_size >= MULTI_STREAM_THRESHOLD { MULTI_STREAM_COUNT } else { 1 };
+        let configured_streams = *self.iroh_stream_count.read().await;
+        let n_streams = if configured_streams > 1 && file_size >= MULTI_STREAM_THRESHOLD { configured_streams } else { 1 };
 
         let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
 
@@ -1944,12 +1946,14 @@ impl TransferService {
         enable_compression: bool,
         speed_limit_bytes_per_sec: u64,
         require_confirmation: bool,
+        iroh_stream_count: u32,
     ) {
         *self.download_dir.write().await = download_dir;
         *self.chunk_size.write().await = chunk_size;
         *self.enable_compression.write().await = enable_compression;
         *self.speed_limit_bytes_per_sec.write().await = speed_limit_bytes_per_sec;
         *self.require_confirmation.write().await = require_confirmation;
+        *self.iroh_stream_count.write().await = iroh_stream_count;
     }
 
     pub async fn update_max_concurrent(&self, n: usize) {
@@ -2012,6 +2016,7 @@ impl Clone for TransferService {
             chunk_size: self.chunk_size.clone(),
             enable_compression: self.enable_compression.clone(),
             speed_limit_bytes_per_sec: self.speed_limit_bytes_per_sec.clone(),
+            iroh_stream_count: self.iroh_stream_count.clone(),
             message_store: self.message_store.clone(),
             history_store: self.history_store.clone(),
             semaphore: self.semaphore.clone(),

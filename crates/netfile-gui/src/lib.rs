@@ -417,6 +417,7 @@ async fn update_config(
             config.transfer.enable_compression,
             config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
             config.transfer.require_confirmation,
+            config.transfer.iroh_stream_count,
         )
         .await;
     state
@@ -702,6 +703,7 @@ pub fn run() {
                     config.transfer.enable_compression,
                     speed_limit_bytes_per_sec,
                     config.transfer.require_confirmation,
+                    config.transfer.iroh_stream_count,
                 ).await;
 
                 let iroh_manager = transfer_service.iroh_manager();

@@ -3,6 +3,7 @@ mod server;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use tokio::io::AsyncReadExt;
@@ -58,6 +59,17 @@ async fn main() -> anyhow::Result<()> {
     } else {
         server::ServerState::new()
     };
+
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                state.cleanup_expired_invites().await;
+            }
+        });
+    }
 
     let addr = format!("{}:{}", args.host, args.port);
     let listener = TcpListener::bind(&addr).await?;

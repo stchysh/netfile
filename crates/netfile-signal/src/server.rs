@@ -49,6 +49,16 @@ impl ServerState {
             relay_addr: Some(relay_addr),
         })
     }
+
+    pub async fn cleanup_expired_invites(&self) {
+        let mut codes = self.invite_codes.write().await;
+        let before = codes.len();
+        codes.retain(|_, entry| entry.created_at.elapsed() <= Duration::from_secs(600));
+        let removed = before - codes.len();
+        if removed > 0 {
+            info!("Cleaned up {} expired invite codes", removed);
+        }
+    }
 }
 
 pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
@@ -145,12 +155,14 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
             for fid in friend_ids {
                 if let Some(entry) = online_map.get(fid) {
                     debug!("[{}] notifying friend {} of online", device_id, fid);
-                    let _ = entry.tx.try_send(S2cMsg::FriendOnline {
+                    if entry.tx.try_send(S2cMsg::FriendOnline {
                         device_id: device_id.clone(),
                         instance_name: instance_name.clone(),
                         transfer_addr: current_transfer_addr.clone(),
                         iroh_addr: if current_iroh_addr.is_empty() { None } else { Some(current_iroh_addr.clone()) },
-                    });
+                    }).is_err() {
+                        warn!("[{}] failed to notify friend [{}] of online (channel full or closed)", device_id, fid);
+                    }
                 }
             }
         }
@@ -190,66 +202,22 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                 debug!("[{}] heartbeat", device_id);
             }
             C2sMsg::UpdateTransferAddr { transfer_addr: new_addr } => {
-                current_transfer_addr = new_addr.clone();
-                let friend_txs = {
-                    let mut online_map = state.online.write().await;
-                    if let Some(entry) = online_map.get_mut(&device_id) {
-                        entry.transfer_addr = new_addr.clone();
-                    }
-                    let friends_map = state.friends.read().await;
-                    let mut txs = Vec::new();
-                    if let Some(friend_ids) = friends_map.get(&device_id) {
-                        for fid in friend_ids {
-                            if let Some(entry) = online_map.get(fid) {
-                                txs.push(entry.tx.clone());
-                            }
-                        }
-                    }
-                    txs
-                };
-                let inst = instance_name.clone();
-                let did = device_id.clone();
-                let addr = new_addr.clone();
-                let iroh = current_iroh_addr.clone();
-                for ftx in friend_txs {
-                    let _ = ftx.try_send(S2cMsg::FriendOnline {
-                        device_id: did.clone(),
-                        instance_name: inst.clone(),
-                        transfer_addr: addr.clone(),
-                        iroh_addr: if iroh.is_empty() { None } else { Some(iroh.clone()) },
-                    });
+                if new_addr != current_transfer_addr {
+                    current_transfer_addr = new_addr.clone();
+                    let txs = collect_friend_txs_and_update_addr(
+                        &state, &device_id, Some(new_addr), None,
+                    ).await;
+                    notify_friends_online(&txs, &device_id, &instance_name, &current_transfer_addr, &current_iroh_addr);
                 }
             }
             C2sMsg::UpdateIrohAddr { iroh_addr } => {
-                info!("[{}] updated iroh_addr", device_id);
-                current_iroh_addr = iroh_addr.clone();
-                let friend_txs = {
-                    let mut online_map = state.online.write().await;
-                    if let Some(entry) = online_map.get_mut(&device_id) {
-                        entry.iroh_addr = iroh_addr.clone();
-                    }
-                    let friends_map = state.friends.read().await;
-                    let mut txs = Vec::new();
-                    if let Some(friend_ids) = friends_map.get(&device_id) {
-                        for fid in friend_ids {
-                            if let Some(entry) = online_map.get(fid) {
-                                txs.push(entry.tx.clone());
-                            }
-                        }
-                    }
-                    txs
-                };
-                let inst = instance_name.clone();
-                let did = device_id.clone();
-                let addr = current_transfer_addr.clone();
-                let iroh = iroh_addr.clone();
-                for ftx in friend_txs {
-                    let _ = ftx.try_send(S2cMsg::FriendOnline {
-                        device_id: did.clone(),
-                        instance_name: inst.clone(),
-                        transfer_addr: addr.clone(),
-                        iroh_addr: if iroh.is_empty() { None } else { Some(iroh.clone()) },
-                    });
+                if iroh_addr != current_iroh_addr {
+                    info!("[{}] updated iroh_addr", device_id);
+                    current_iroh_addr = iroh_addr.clone();
+                    let txs = collect_friend_txs_and_update_addr(
+                        &state, &device_id, None, Some(iroh_addr),
+                    ).await;
+                    notify_friends_online(&txs, &device_id, &instance_name, &current_transfer_addr, &current_iroh_addr);
                 }
             }
             C2sMsg::GenerateInvite => {
@@ -325,17 +293,21 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                             let online_map = state.online.read().await;
                             if let Some(entry) = online_map.get(&initiator_id) {
                                 debug!("[{}] notifying initiator [{}] of pairing", device_id, initiator_id);
-                                let _ = entry.tx.try_send(S2cMsg::FriendOnline {
+                                if entry.tx.try_send(S2cMsg::FriendOnline {
                                     device_id: my_info.device_id.clone(),
                                     instance_name: my_info.instance_name.clone(),
                                     transfer_addr: my_info.transfer_addr.clone().unwrap_or_default(),
                                     iroh_addr: my_info.iroh_addr.clone(),
-                                });
-                                let _ = entry.tx.try_send(S2cMsg::InviteResult {
+                                }).is_err() {
+                                    warn!("[{}] failed to notify initiator [{}] of pairing (channel full or closed)", device_id, initiator_id);
+                                }
+                                if entry.tx.try_send(S2cMsg::InviteResult {
                                     success: true,
                                     friend: Some(my_info),
                                     error: None,
-                                });
+                                }).is_err() {
+                                    warn!("[{}] failed to send InviteResult to initiator [{}] (channel full or closed)", device_id, initiator_id);
+                                }
                             }
                         }
                     }
@@ -364,10 +336,12 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                 }).await;
                 let online_map = state.online.read().await;
                 if let Some(target) = online_map.get(&to_device_id) {
-                    let _ = target.tx.try_send(S2cMsg::RelayReady {
+                    if target.tx.try_send(S2cMsg::RelayReady {
                         session_key,
                         relay_addr,
-                    });
+                    }).is_err() {
+                        warn!("[{}] failed to send RelayReady to [{}] (channel full or closed)", device_id, to_device_id);
+                    }
                 }
             }
             C2sMsg::RelayMessage { to_device_id, content, timestamp } => {
@@ -389,7 +363,9 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                 let online_map = state.online.read().await;
                 if let Some(target) = online_map.get(&to_device_id) {
                     debug!("[{}] relay message to online [{}]", device_id, to_device_id);
-                    let _ = target.tx.try_send(relay_msg);
+                    if target.tx.try_send(relay_msg).is_err() {
+                        warn!("[{}] failed to relay message to [{}] (channel full or closed)", device_id, to_device_id);
+                    }
                 } else {
                     drop(online_map);
                     debug!("[{}] target [{}] offline, queuing message", device_id, to_device_id);
@@ -427,9 +403,57 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
             for fid in friend_ids {
                 if let Some(entry) = online_map.get(fid) {
                     debug!("[{}] notifying friend [{}] of offline", device_id, fid);
-                    let _ = entry.tx.try_send(S2cMsg::FriendOffline { device_id: device_id.clone() });
+                    if entry.tx.try_send(S2cMsg::FriendOffline { device_id: device_id.clone() }).is_err() {
+                        warn!("[{}] failed to notify friend [{}] of offline (channel full or closed)", device_id, fid);
+                    }
                 }
             }
+        }
+    }
+}
+
+async fn collect_friend_txs_and_update_addr(
+    state: &Arc<ServerState>,
+    device_id: &str,
+    new_transfer_addr: Option<String>,
+    new_iroh_addr: Option<String>,
+) -> Vec<mpsc::Sender<S2cMsg>> {
+    let mut online_map = state.online.write().await;
+    if let Some(entry) = online_map.get_mut(device_id) {
+        if let Some(addr) = new_transfer_addr {
+            entry.transfer_addr = addr;
+        }
+        if let Some(addr) = new_iroh_addr {
+            entry.iroh_addr = addr;
+        }
+    }
+    let friends_map = state.friends.read().await;
+    let mut txs = Vec::new();
+    if let Some(friend_ids) = friends_map.get(device_id) {
+        for fid in friend_ids {
+            if let Some(entry) = online_map.get(fid) {
+                txs.push(entry.tx.clone());
+            }
+        }
+    }
+    txs
+}
+
+fn notify_friends_online(
+    txs: &[mpsc::Sender<S2cMsg>],
+    device_id: &str,
+    instance_name: &str,
+    transfer_addr: &str,
+    iroh_addr: &str,
+) {
+    for ftx in txs {
+        if ftx.try_send(S2cMsg::FriendOnline {
+            device_id: device_id.to_string(),
+            instance_name: instance_name.to_string(),
+            transfer_addr: transfer_addr.to_string(),
+            iroh_addr: if iroh_addr.is_empty() { None } else { Some(iroh_addr.to_string()) },
+        }).is_err() {
+            warn!("[{}] failed to send FriendOnline to friend channel (full or closed)", device_id);
         }
     }
 }

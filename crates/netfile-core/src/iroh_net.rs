@@ -1,7 +1,9 @@
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh::endpoint::{QuicTransportConfig, VarInt};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 
 pub const ALPN: &[u8] = b"netfile/1";
@@ -34,9 +36,20 @@ impl IrohManager {
             k
         };
 
+        // 32MB per-stream window, 64MB connection window, 120s idle timeout, 15s keepalive.
+        // Default Quinn window (~1MB) causes 30-60s stalls per chunk on slow NAT links.
+        let transport_config = QuicTransportConfig::builder()
+            .stream_receive_window(VarInt::from_u32(32 * 1024 * 1024))
+            .receive_window(VarInt::from_u32(64 * 1024 * 1024))
+            .send_window(64 * 1024 * 1024u64)
+            .max_idle_timeout(Some(VarInt::from_u32(120_000).into()))
+            .keep_alive_interval(Duration::from_secs(15))
+            .build();
+
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![ALPN.to_vec()])
+            .transport_config(transport_config)
             .bind()
             .await?;
 

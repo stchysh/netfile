@@ -566,8 +566,46 @@ fn spawn_iroh_addr_watcher(sc: Arc<SignalClient>, iroh_manager: Arc<IrohManager>
     })
 }
 
+fn cleanup_old_logs(log_dir: &std::path::Path, max_files: usize) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else { return };
+    let mut files: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("netfile.log"))
+        .collect();
+    files.sort_by_key(|e| e.file_name());
+    if files.len() > max_files {
+        for old in &files[..files.len() - max_files] {
+            std::fs::remove_file(old.path()).ok();
+        }
+    }
+}
+
+fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".netfile")
+        .join("logs");
+
+    std::fs::create_dir_all(&log_dir).ok();
+    cleanup_old_logs(&log_dir, 14);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "netfile.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(fmt::layer().with_writer(non_blocking).with_ansi(false))
+        .init();
+
+    guard
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _log_guard = init_logging();
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");

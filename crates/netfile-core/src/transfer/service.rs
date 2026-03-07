@@ -1043,8 +1043,6 @@ impl TransferService {
             })).await?;
 
             let fp = file_path.clone();
-            let pt = self.progress_tracker.clone();
-            let fid = file_id.to_string();
             let spdlim = speed_limit_bytes_per_sec;
 
             tasks.spawn(async move {
@@ -1096,7 +1094,9 @@ impl TransferService {
                         );
                     }
 
-                    pt.update_progress(&fid, bytes_len).await;
+                    // Do NOT update sender progress here: write_chunk_raw returns when data enters
+                    // the QUIC send buffer (not when the receiver writes to disk), which would
+                    // make sender progress appear much faster than the real transfer speed.
 
                     if spdlim > 0 {
                         let delay = (bytes_len * 1_000_000) / spdlim;
@@ -1126,6 +1126,12 @@ impl TransferService {
                 Ok(Ok((_, _, _, _, bytes, _))) => { total_bytes_all += bytes; }
             }
         }
+
+        // Update sender progress once all data has been queued into QUIC buffers.
+        // This is still slightly optimistic (QUIC may not have delivered everything yet),
+        // but avoids the "instant 100%" effect of per-chunk updates.
+        let progress_tracker_ref = &self.progress_tracker;
+        progress_tracker_ref.update_progress(&file_id.to_string(), total_bytes_all).await;
 
         let parallel_ms = t_parallel_start.elapsed().as_millis() as u64;
         let agg_mbps = if parallel_ms > 0 {

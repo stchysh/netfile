@@ -164,7 +164,7 @@ impl Default for TransferConfig {
             enable_compression: false,
             download_dir: String::new(),
             speed_limit_mbps: 0,
-            require_confirmation: false,
+            require_confirmation: true,
         }
     }
 }

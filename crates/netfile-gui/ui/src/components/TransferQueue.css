@@ -3,6 +3,8 @@
   display: flex;
   flex-direction: column;
   background-color: white;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .transfer-queue-header {
@@ -28,6 +30,7 @@
   flex: 1;
   overflow-y: auto;
   padding: 1.5rem;
+  min-height: 0;
 }
 
 .transfer-item {

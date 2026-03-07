@@ -26,6 +26,7 @@ pub struct ServerState {
     friends: RwLock<HashMap<String, HashSet<String>>>,
     invite_codes: RwLock<HashMap<String, InviteEntry>>,
     offline_msgs: RwLock<HashMap<String, Vec<OfflineMsg>>>,
+    pub relay_addr: Option<String>,
 }
 
 impl ServerState {
@@ -35,6 +36,17 @@ impl ServerState {
             friends: RwLock::new(HashMap::new()),
             invite_codes: RwLock::new(HashMap::new()),
             offline_msgs: RwLock::new(HashMap::new()),
+            relay_addr: None,
+        })
+    }
+
+    pub fn new_with_relay(relay_addr: String) -> Arc<Self> {
+        Arc::new(Self {
+            online: RwLock::new(HashMap::new()),
+            friends: RwLock::new(HashMap::new()),
+            invite_codes: RwLock::new(HashMap::new()),
+            offline_msgs: RwLock::new(HashMap::new()),
+            relay_addr: Some(relay_addr),
         })
     }
 }
@@ -107,7 +119,7 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
         }
     }
 
-    if write_s2c(&mut stream, &S2cMsg::Registered { friends: online_friends.clone(), observed_addr: observed_ip.clone() }).await.is_err() {
+    if write_s2c(&mut stream, &S2cMsg::Registered { friends: online_friends.clone(), observed_addr: observed_ip.clone(), relay_addr: state.relay_addr.clone() }).await.is_err() {
         warn!("[{}] failed to send Registered, disconnecting", device_id);
         return;
     }
@@ -327,6 +339,35 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
                             }
                         }
                     }
+                }
+            }
+            C2sMsg::RequestRelay { to_device_id } => {
+                let relay_addr = match &state.relay_addr {
+                    Some(addr) => addr.clone(),
+                    None => {
+                        let _ = tx.send(S2cMsg::Error { message: "服务器未启用relay".to_string() }).await;
+                        continue;
+                    }
+                };
+                let is_friend = {
+                    let friends_map = state.friends.read().await;
+                    friends_map.get(&device_id).map_or(false, |s| s.contains(&to_device_id))
+                };
+                if !is_friend {
+                    let _ = tx.send(S2cMsg::Error { message: "非好友".to_string() }).await;
+                    continue;
+                }
+                let session_key = Uuid::new_v4().to_string();
+                let _ = tx.send(S2cMsg::RelayReady {
+                    session_key: session_key.clone(),
+                    relay_addr: relay_addr.clone(),
+                }).await;
+                let online_map = state.online.read().await;
+                if let Some(target) = online_map.get(&to_device_id) {
+                    let _ = target.tx.try_send(S2cMsg::RelayReady {
+                        session_key,
+                        relay_addr,
+                    });
                 }
             }
             C2sMsg::RelayMessage { to_device_id, content, timestamp } => {

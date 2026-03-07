@@ -46,6 +46,9 @@ pub enum C2sMsg {
     UpdateIrohAddr {
         iroh_addr: String,
     },
+    RequestRelay {
+        to_device_id: String,
+    },
     Heartbeat,
 }
 
@@ -56,6 +59,8 @@ pub enum S2cMsg {
         friends: Vec<FriendInfo>,
         #[serde(default)]
         observed_addr: String,
+        #[serde(default)]
+        relay_addr: Option<String>,
     },
     InviteCode {
         code: String,
@@ -83,6 +88,10 @@ pub enum S2cMsg {
     },
     OfflineMessages {
         messages: Vec<OfflineMsg>,
+    },
+    RelayReady {
+        session_key: String,
+        relay_addr: String,
     },
     Error {
         message: String,

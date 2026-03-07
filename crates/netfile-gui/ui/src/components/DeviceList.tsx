@@ -188,6 +188,18 @@ function DeviceList({ devices }: Props) {
 
   const handleOpenFriend = (f: FriendInfo) => {
     const addr = f.transfer_addr ?? ''
+    if (!addr) {
+      console.warn('[punch-flow][ui] open friend with empty transfer_addr', {
+        deviceId: f.device_id,
+        instanceName: f.instance_name,
+      })
+    } else {
+      console.info('[punch-flow][ui] open friend with transfer_addr', {
+        deviceId: f.device_id,
+        instanceName: f.instance_name,
+        transferAddr: addr,
+      })
+    }
     const colonIdx = addr.lastIndexOf(':')
     const pseudoDevice: Device = {
       device_id: f.device_id,
@@ -244,6 +256,9 @@ function DeviceList({ devices }: Props) {
                   <div className="friends-label">网络好友</div>
                   {signalFriends.filter(f => f.online).map(f => {
                     const hasUnread = unreadIds.has(f.device_id) && activeChatDeviceId !== f.device_id
+                    const addr = f.transfer_addr ?? ''
+                    const colonIdx = addr.lastIndexOf(':')
+                    const ip = colonIdx >= 0 ? addr.slice(0, colonIdx) : (addr || '未知')
                     return (
                       <div className="device-item" key={f.device_id} onClick={() => handleOpenFriend(f)}>
                         <div className="device-info">
@@ -251,7 +266,7 @@ function DeviceList({ devices }: Props) {
                           <div className="device-details">
                             <div className="device-name">
                               {f.instance_name}
-                              <span className="wan-badge">WAN</span>
+                              <span className="instance-name"> ({ip})</span>
                             </div>
                           </div>
                         </div>

@@ -144,7 +144,7 @@ impl TransferService {
                 };
                 match conn.accept_bi().await {
                     Ok((mut send, mut recv)) => {
-                        if let Err(e) = service.handle_connection(&mut send, &mut recv).await {
+                        if let Err(e) = service.handle_connection(&mut send, &mut recv, "iroh").await {
                             debug!("iroh connection ended: {}", e);
                         }
                     }
@@ -178,18 +178,19 @@ impl TransferService {
         stream.set_nodelay(true)?;
         info!("New TCP connection from {}", addr);
         let (mut read_half, mut write_half) = stream.into_split();
-        self.handle_connection(&mut write_half, &mut read_half).await
+        self.handle_connection(&mut write_half, &mut read_half, "lan").await
     }
 
     async fn handle_connection<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &self,
         send: &mut W,
         recv: &mut R,
+        transfer_method: &str,
     ) -> Result<()> {
         let message = Self::read_msg(recv).await?;
         match message {
             Message::TransferRequest(request) => {
-                self.handle_transfer_request(send, recv, request).await?;
+                self.handle_transfer_request(send, recv, request, transfer_method).await?;
             }
             Message::TextMessage(msg) => {
                 self.handle_text_message(send, msg).await?;
@@ -257,6 +258,7 @@ impl TransferService {
         send: &mut W,
         recv: &mut R,
         request: TransferRequest,
+        transfer_method: &str,
     ) -> Result<()> {
         info!(
             "Received transfer request: {} ({} bytes)",
@@ -272,6 +274,7 @@ impl TransferService {
             self.progress_tracker
                 .register_pending_confirm(progress_id.clone(), request.file_name.clone(), request.file_size)
                 .await;
+            self.progress_tracker.set_transfer_method(&progress_id, transfer_method).await;
             let (tx, rx) = oneshot::channel();
             self.pending_confirmations.write().await.insert(progress_id.clone(), tx);
             let accepted = rx.await.unwrap_or(false);
@@ -306,6 +309,7 @@ impl TransferService {
                 "receive".to_string(),
             )
             .await;
+        self.progress_tracker.set_transfer_method(&progress_id, transfer_method).await;
 
         let response = TransferResponse {
             file_id: file_id.clone(),
@@ -391,9 +395,9 @@ impl TransferService {
             }
         }
 
-        let elapsed = self.progress_tracker.get_progress(&progress_id).await
-            .map(|p| p.start_time.elapsed().as_secs())
-            .unwrap_or(0);
+        let (elapsed, method) = self.progress_tracker.get_progress(&progress_id).await
+            .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
+            .unwrap_or((0, None));
         self.progress_tracker.remove_progress(&progress_id).await;
 
         let ts = std::time::SystemTime::now()
@@ -410,6 +414,7 @@ impl TransferService {
             timestamp: ts,
             elapsed_secs: elapsed,
             save_path: Some(download_dir.join(request.relative_path.as_deref().unwrap_or(&request.file_name)).to_string_lossy().to_string()),
+            transfer_method: method,
         }).await;
 
         Ok(())
@@ -498,6 +503,7 @@ impl TransferService {
         target_addr: SocketAddr,
         enable_compression: bool,
     ) -> Result<()> {
+        const METHOD: &str = "lan";
         let folder_name = folder_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -529,6 +535,7 @@ impl TransferService {
                 "send".to_string(),
             )
             .await;
+        self.progress_tracker.set_transfer_method(&folder_id, METHOD).await;
 
         let _permit = {
             let sem = self.semaphore.read().await.clone();
@@ -596,6 +603,7 @@ impl TransferService {
         endpoint_addr: iroh::EndpointAddr,
         enable_compression: bool,
     ) -> Result<()> {
+        const METHOD: &str = "iroh";
         let folder_name = folder_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -627,6 +635,7 @@ impl TransferService {
                 "send".to_string(),
             )
             .await;
+        self.progress_tracker.set_transfer_method(&folder_id, METHOD).await;
 
         let _permit = {
             let sem = self.semaphore.read().await.clone();
@@ -705,6 +714,7 @@ impl TransferService {
         target_addr: SocketAddr,
         enable_compression: bool,
     ) -> Result<String> {
+        const METHOD: &str = "lan";
         let chunk_size = *self.chunk_size.read().await;
         let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
 
@@ -736,6 +746,7 @@ impl TransferService {
                 "send".to_string(),
             )
             .await;
+        self.progress_tracker.set_transfer_method(&file_id, METHOD).await;
 
         let request = TransferRequest {
             file_id: file_id.clone(),
@@ -867,9 +878,9 @@ impl TransferService {
             _ => {}
         }
 
-        let elapsed = self.progress_tracker.get_progress(&file_id).await
-            .map(|p| p.start_time.elapsed().as_secs())
-            .unwrap_or(0);
+        let (elapsed, method) = self.progress_tracker.get_progress(&file_id).await
+            .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
+            .unwrap_or((0, None));
         self.progress_tracker.remove_progress(&file_id).await;
         info!("File transfer completed: {}", file_id);
 
@@ -887,6 +898,7 @@ impl TransferService {
             timestamp: ts,
             elapsed_secs: elapsed,
             save_path: Some(file_path.to_string_lossy().to_string()),
+            transfer_method: method,
         }).await;
 
         Ok(file_id)
@@ -1027,6 +1039,7 @@ impl TransferService {
         endpoint_addr: iroh::EndpointAddr,
         enable_compression: bool,
     ) -> Result<String> {
+        const METHOD: &str = "iroh";
         let chunk_size = *self.chunk_size.read().await;
         let speed_limit_bytes_per_sec = *self.speed_limit_bytes_per_sec.read().await;
 
@@ -1058,6 +1071,7 @@ impl TransferService {
                 "send".to_string(),
             )
             .await;
+        self.progress_tracker.set_transfer_method(&file_id, METHOD).await;
 
         let request = TransferRequest {
             file_id: file_id.clone(),
@@ -1197,9 +1211,9 @@ impl TransferService {
 
         let _ = send.finish();
 
-        let elapsed = self.progress_tracker.get_progress(&file_id).await
-            .map(|p| p.start_time.elapsed().as_secs())
-            .unwrap_or(0);
+        let (elapsed, method) = self.progress_tracker.get_progress(&file_id).await
+            .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
+            .unwrap_or((0, None));
         self.progress_tracker.remove_progress(&file_id).await;
         info!("iroh file transfer completed: {}", file_id);
 
@@ -1217,6 +1231,7 @@ impl TransferService {
             timestamp: ts,
             elapsed_secs: elapsed,
             save_path: Some(file_path.to_string_lossy().to_string()),
+            transfer_method: method,
         }).await;
 
         Ok(file_id)

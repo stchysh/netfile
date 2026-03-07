@@ -17,6 +17,8 @@ pub struct TransferRecord {
     pub elapsed_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub save_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_method: Option<String>,
 }
 
 pub struct HistoryStore {

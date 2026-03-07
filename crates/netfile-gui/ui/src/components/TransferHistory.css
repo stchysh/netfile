@@ -68,6 +68,17 @@
   min-width: 0;
 }
 
+.method-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.125rem 0.35rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+  background-color: #f3f4f6;
+  color: #6b7280;
+  border: 1px solid #e5e7eb;
+}
+
 .history-file-name {
   font-weight: 500;
   color: #2c3e50;

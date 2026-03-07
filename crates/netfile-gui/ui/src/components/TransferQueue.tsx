@@ -16,6 +16,13 @@ interface Transfer {
   paused: boolean
   current_file?: string
   error?: string
+  transfer_method?: string
+}
+
+function methodLabel(method?: string): string {
+  if (method === 'lan') return 'LAN'
+  if (method === 'iroh') return 'NAT'
+  return ''
 }
 
 interface Props {
@@ -177,11 +184,13 @@ function TransferQueue({ transfers }: Props) {
             const sorted = [...pendingConfirm, ...active, ...queued]
             return sorted.map((transfer) => {
             if (transfer.status === 'pending_confirm') {
+              const mLabel = methodLabel(transfer.transfer_method)
               return (
                 <div key={transfer.file_id} className="transfer-item">
                   <div className="transfer-header">
                     <div className="transfer-name-row">
                       <span className="direction-badge direction-receive">接收</span>
+                      {mLabel && <span className="method-badge">{mLabel}</span>}
                       <div className="transfer-name">{transfer.file_name}</div>
                     </div>
                     <div className="transfer-header-right">
@@ -268,6 +277,7 @@ function TransferQueue({ transfers }: Props) {
             const progress = calculateProgress(transfer.transferred, transfer.total_size)
             const eta = formatEta(transfer.eta_secs)
             const elapsed = formatElapsed(transfer.elapsed_secs)
+            const mLabel = methodLabel(transfer.transfer_method)
             return (
               <div key={transfer.file_id} className="transfer-item">
                 <div className="transfer-header">
@@ -275,6 +285,7 @@ function TransferQueue({ transfers }: Props) {
                     <span className={`direction-badge direction-${transfer.direction}`}>
                       {transfer.direction === 'send' ? '发送' : '接收'}
                     </span>
+                    {mLabel && <span className="method-badge">{mLabel}</span>}
                     <div className="transfer-name">{transfer.file_name}</div>
                   </div>
                   <div className="transfer-header-right">

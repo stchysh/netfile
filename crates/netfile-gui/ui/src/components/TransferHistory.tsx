@@ -12,6 +12,13 @@ interface TransferRecord {
   timestamp: number
   elapsed_secs: number
   save_path?: string
+  transfer_method?: string
+}
+
+function methodLabel(method?: string): string {
+  if (method === 'lan') return 'LAN'
+  if (method === 'iroh') return 'NAT'
+  return ''
 }
 
 function TransferHistory() {
@@ -118,6 +125,9 @@ function TransferHistory() {
                   <span className={`direction-badge direction-${record.direction}`}>
                     {record.direction === 'send' ? '发送' : '接收'}
                   </span>
+                  {methodLabel(record.transfer_method) && (
+                    <span className="method-badge">{methodLabel(record.transfer_method)}</span>
+                  )}
                   <div className="history-file-name">{record.file_name}</div>
                 </div>
                 <span className={`history-status-label ${record.status === 'failed' ? 'status-failed' : 'status-completed'}`}>

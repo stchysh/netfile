@@ -294,7 +294,7 @@ impl TransferService {
 
         // Spawn writer tasks — each seeks once to the first chunk's offset, then writes sequentially
         let t_write_start = Instant::now();
-        let mut writer_set: JoinSet<Result<(u64, u64)>> = JoinSet::new();
+        let mut writer_set: JoinSet<Result<(u64, u64, u64, u64)>> = JoinSet::new();
         for (stream_idx, rx) in channel_receivers.into_iter().enumerate() {
             let temp_path = temp_file_path.clone();
             let chunk_size_u64 = chunk_size as u64;
@@ -302,11 +302,13 @@ impl TransferService {
             let pid = progress_id.clone();
             let fid = file_id.clone();
             writer_set.spawn(async move {
+                let t_task = Instant::now();
                 let mut file = tokio::fs::OpenOptions::new().write(true).open(&temp_path).await?;
                 let mut rx = rx;
                 let mut first = true;
                 let mut total_decompress_ms = 0u64;
                 let mut total_write_ms = 0u64;
+                let mut total_bytes_written = 0u64;
                 while let Some((chunk_index, compressed, data)) = rx.recv().await {
                     let t_decomp = Instant::now();
                     let write_data = if compressed {
@@ -323,17 +325,23 @@ impl TransferService {
                         file.seek(std::io::SeekFrom::Start(offset)).await?;
                         first = false;
                     }
+                    let wlen = write_data.len() as u64;
                     file.write_all(&write_data).await?;
                     total_write_ms += t_write.elapsed().as_millis() as u64;
+                    total_bytes_written += wlen;
 
-                    tracker.update_progress(&pid, write_data.len() as u64).await;
+                    tracker.update_progress(&pid, wlen).await;
                 }
+                let task_elapsed_ms = t_task.elapsed().as_millis() as u64;
+                let mbps = if task_elapsed_ms > 0 {
+                    (total_bytes_written as f64 / 1_048_576.0) / (task_elapsed_ms as f64 / 1000.0)
+                } else { 0.0 };
                 info!(
-                    "[recv/iroh/multi] stream={} decompress_ms={} write_ms={}",
-                    stream_idx, total_decompress_ms, total_write_ms
+                    "[recv/iroh/multi] stream={} bytes={} elapsed_ms={} decompress_ms={} write_ms={} throughput={:.2}MB/s",
+                    stream_idx, total_bytes_written, task_elapsed_ms, total_decompress_ms, total_write_ms, mbps
                 );
                 debug!("[recv/iroh/multi] writer task done for {}", fid);
-                Ok((total_decompress_ms, total_write_ms))
+                Ok((total_decompress_ms, total_write_ms, total_bytes_written, task_elapsed_ms))
             });
         }
 
@@ -1020,7 +1028,8 @@ impl TransferService {
         let chunks_per_stream = (total_chunks + n_streams - 1) / n_streams;
 
         // Step 3: open N data streams and spawn N independent range tasks
-        let mut tasks: JoinSet<Result<(usize, u64, u64, u64)>> = JoinSet::new();
+        let t_parallel_start = Instant::now();
+        let mut tasks: JoinSet<Result<(usize, u64, u64, u64, u64, u64)>> = JoinSet::new();
         for i in 0..n {
             let start_chunk = (i as u32) * chunks_per_stream;
             if start_chunk >= total_chunks { break; }
@@ -1039,6 +1048,7 @@ impl TransferService {
             let spdlim = speed_limit_bytes_per_sec;
 
             tasks.spawn(async move {
+                let t_task = Instant::now();
                 let byte_offset = start_chunk as u64 * chunk_size as u64;
                 let mut file = tokio::fs::File::open(&fp).await?;
                 file.seek(std::io::SeekFrom::Start(byte_offset)).await?;
@@ -1046,6 +1056,7 @@ impl TransferService {
                 let mut total_read_ms = 0u64;
                 let mut total_compress_ms = 0u64;
                 let mut total_send_ms = 0u64;
+                let mut total_bytes_sent = 0u64;
 
                 for chunk_index in start_chunk..end_chunk {
                     let offset = chunk_index as u64 * chunk_size as u64;
@@ -1070,10 +1081,20 @@ impl TransferService {
                     total_compress_ms += t_compress.elapsed().as_millis() as u64;
 
                     let bytes_len = send_data.len() as u64;
+                    total_bytes_sent += bytes_len;
 
                     let t_send = Instant::now();
                     Self::write_chunk_raw(&mut ds_send, chunk_index, compressed, &send_data).await?;
-                    total_send_ms += t_send.elapsed().as_millis() as u64;
+                    let chunk_send_ms = t_send.elapsed().as_millis() as u64;
+                    total_send_ms += chunk_send_ms;
+
+                    // Warn if a single chunk send stalled — likely QUIC flow control
+                    if chunk_send_ms > 500 {
+                        warn!(
+                            "[send/iroh/multi] stream={} chunk={} STALL send_ms={} (possible QUIC flow-control)",
+                            i, chunk_index, chunk_send_ms
+                        );
+                    }
 
                     pt.update_progress(&fid, bytes_len).await;
 
@@ -1083,21 +1104,37 @@ impl TransferService {
                     }
                 }
 
+                let task_elapsed_ms = t_task.elapsed().as_millis() as u64;
+                let mbps = if task_elapsed_ms > 0 {
+                    (total_bytes_sent as f64 / 1_048_576.0) / (task_elapsed_ms as f64 / 1000.0)
+                } else { 0.0 };
+
                 info!(
-                    "[send/iroh/multi] stream={} chunks={}..{} read_ms={} compress_ms={} send_ms={}",
-                    i, start_chunk, end_chunk, total_read_ms, total_compress_ms, total_send_ms
+                    "[send/iroh/multi] stream={} chunks={}..{} bytes={} elapsed_ms={} read_ms={} compress_ms={} send_ms={} throughput={:.2}MB/s",
+                    i, start_chunk, end_chunk, total_bytes_sent, task_elapsed_ms,
+                    total_read_ms, total_compress_ms, total_send_ms, mbps
                 );
-                Ok((i, total_read_ms, total_compress_ms, total_send_ms))
+                Ok((i, total_read_ms, total_compress_ms, total_send_ms, total_bytes_sent, task_elapsed_ms))
             });
         }
 
+        let mut total_bytes_all = 0u64;
         while let Some(result) = tasks.join_next().await {
             match result {
                 Err(e) => warn!("[send/iroh/multi] stream task panicked: {:?}", e),
                 Ok(Err(e)) => warn!("[send/iroh/multi] stream error: {}", e),
-                Ok(Ok(_)) => {}
+                Ok(Ok((_, _, _, _, bytes, _))) => { total_bytes_all += bytes; }
             }
         }
+
+        let parallel_ms = t_parallel_start.elapsed().as_millis() as u64;
+        let agg_mbps = if parallel_ms > 0 {
+            (total_bytes_all as f64 / 1_048_576.0) / (parallel_ms as f64 / 1000.0)
+        } else { 0.0 };
+        info!(
+            "[send/iroh/multi] file_id={} all_streams_done total_bytes={} parallel_ms={} aggregate={:.2}MB/s",
+            file_id, total_bytes_all, parallel_ms, agg_mbps
+        );
 
         Ok(file_hash)
     }
@@ -1735,6 +1772,7 @@ impl TransferService {
             return Err(e);
         }
 
+        let t_ack_wait = Instant::now();
         match Self::read_msg(&mut recv).await {
             Ok(Message::TransferComplete(_)) => {}
             Ok(Message::TransferError(e)) => {
@@ -1749,6 +1787,7 @@ impl TransferService {
                 return Err(e);
             }
         }
+        info!("[send/iroh] ack_wait_ms={} file_id={} (receiver write+rename+RTT)", t_ack_wait.elapsed().as_millis(), file_id);
 
         let _ = send.finish();
 
@@ -1756,7 +1795,8 @@ impl TransferService {
             .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
             .unwrap_or((0, None));
         self.progress_tracker.remove_progress(&file_id).await;
-        info!("[send/iroh] completed file_id={} name={:?} size={} elapsed={}s", file_id, file_name, file_size, elapsed);
+        let total_mbps = if elapsed > 0 { (file_size as f64 / 1_048_576.0) / elapsed as f64 } else { 0.0 };
+        info!("[send/iroh] completed file_id={} name={:?} size={} elapsed={}s avg={:.2}MB/s streams={}", file_id, file_name, file_size, elapsed, total_mbps, n_streams);
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -318,7 +318,10 @@ impl TransferService {
             resume_from_chunk: if resume_from_chunk > 0 { Some(resume_from_chunk) } else { None },
         };
 
-        Self::write_msg(send, &Message::TransferResponse(response)).await?;
+        if let Err(e) = Self::write_msg(send, &Message::TransferResponse(response)).await {
+            self.progress_tracker.remove_progress(&progress_id).await;
+            return Err(e);
+        }
 
         for _ in 0..(total_chunks - resume_from_chunk) {
             let (chunk_index, compressed, data) = match Self::read_chunk_raw(recv).await {
@@ -379,10 +382,13 @@ impl TransferService {
         match receiver.finalize(tc.file_hash).await {
             Ok(()) => {
                 info!("Transfer completed for file: {}", file_id);
-                Self::write_msg(send, &Message::TransferComplete(TransferComplete {
+                if let Err(e) = Self::write_msg(send, &Message::TransferComplete(TransferComplete {
                     file_id: file_id.clone(),
                     file_hash: tc.file_hash,
-                })).await?;
+                })).await {
+                    self.progress_tracker.remove_progress(&progress_id).await;
+                    return Err(e);
+                }
             }
             Err(e) => {
                 let _ = Self::write_msg(send, &Message::TransferError(TransferError {
@@ -805,7 +811,13 @@ impl TransferService {
 
         self.progress_tracker.set_active(&file_id).await;
 
-        let mut file = tokio::fs::File::open(&file_path).await?;
+        let mut file = match tokio::fs::File::open(&file_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e.into());
+            }
+        };
         let mut hasher = Sha256::new();
 
         if resume_from > 0 {
@@ -814,7 +826,10 @@ impl TransferService {
             let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
             while remaining_skip > 0 {
                 let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
-                file.read_exact(&mut skip_buf[..read_size]).await?;
+                if let Err(e) = file.read_exact(&mut skip_buf[..read_size]).await {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e.into());
+                }
                 hasher.update(&skip_buf[..read_size]);
                 remaining_skip -= read_size as u64;
             }
@@ -837,7 +852,10 @@ impl TransferService {
             let remaining = file_size - offset;
             let read_size = (chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0u8; read_size];
-            file.read_exact(&mut buffer).await?;
+            if let Err(e) = file.read_exact(&mut buffer).await {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e.into());
+            }
 
             hasher.update(&buffer);
 
@@ -851,7 +869,10 @@ impl TransferService {
             };
 
             let chunk_bytes_len = send_data.len() as u64;
-            Self::write_chunk_raw(&mut write_half, chunk_index, compressed, &send_data).await?;
+            if let Err(e) = Self::write_chunk_raw(&mut write_half, chunk_index, compressed, &send_data).await {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
+            }
             self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
 
             if speed_limit_bytes_per_sec > 0 {
@@ -864,18 +885,25 @@ impl TransferService {
         let mut file_hash = [0u8; 32];
         file_hash.copy_from_slice(&hash_result);
 
-        Self::write_msg(&mut write_half, &Message::TransferComplete(TransferComplete {
+        if let Err(e) = Self::write_msg(&mut write_half, &Message::TransferComplete(TransferComplete {
             file_id: file_id.clone(),
             file_hash,
-        })).await?;
+        })).await {
+            self.progress_tracker.remove_progress(&file_id).await;
+            return Err(e);
+        }
 
-        match Self::read_msg(&mut read_half).await? {
-            Message::TransferComplete(_) => {}
-            Message::TransferError(e) => {
+        match Self::read_msg(&mut read_half).await {
+            Ok(Message::TransferComplete(_)) => {}
+            Ok(Message::TransferError(e)) => {
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(anyhow::anyhow!("Receiver error: {}", e.error));
             }
-            _ => {}
+            Ok(_) => {}
+            Err(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
+            }
         }
 
         let (elapsed, method) = self.progress_tracker.get_progress(&file_id).await
@@ -1136,7 +1164,13 @@ impl TransferService {
 
         self.progress_tracker.set_active(&file_id).await;
 
-        let mut file = tokio::fs::File::open(&file_path).await?;
+        let mut file = match tokio::fs::File::open(&file_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e.into());
+            }
+        };
         let mut hasher = Sha256::new();
 
         if resume_from > 0 {
@@ -1145,7 +1179,10 @@ impl TransferService {
             let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
             while remaining_skip > 0 {
                 let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
-                file.read_exact(&mut skip_buf[..read_size]).await?;
+                if let Err(e) = file.read_exact(&mut skip_buf[..read_size]).await {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e.into());
+                }
                 hasher.update(&skip_buf[..read_size]);
                 remaining_skip -= read_size as u64;
             }
@@ -1168,7 +1205,10 @@ impl TransferService {
             let remaining = file_size - offset;
             let read_size = (chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0u8; read_size];
-            file.read_exact(&mut buffer).await?;
+            if let Err(e) = file.read_exact(&mut buffer).await {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e.into());
+            }
 
             hasher.update(&buffer);
 
@@ -1182,7 +1222,10 @@ impl TransferService {
             };
 
             let chunk_bytes_len = send_data.len() as u64;
-            Self::write_chunk_raw(&mut send, chunk_index, compressed, &send_data).await?;
+            if let Err(e) = Self::write_chunk_raw(&mut send, chunk_index, compressed, &send_data).await {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
+            }
             self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
 
             if speed_limit_bytes_per_sec > 0 {
@@ -1195,18 +1238,25 @@ impl TransferService {
         let mut file_hash = [0u8; 32];
         file_hash.copy_from_slice(&hash_result);
 
-        Self::write_msg(&mut send, &Message::TransferComplete(TransferComplete {
+        if let Err(e) = Self::write_msg(&mut send, &Message::TransferComplete(TransferComplete {
             file_id: file_id.clone(),
             file_hash,
-        })).await?;
+        })).await {
+            self.progress_tracker.remove_progress(&file_id).await;
+            return Err(e);
+        }
 
-        match Self::read_msg(&mut recv).await? {
-            Message::TransferComplete(_) => {}
-            Message::TransferError(e) => {
+        match Self::read_msg(&mut recv).await {
+            Ok(Message::TransferComplete(_)) => {}
+            Ok(Message::TransferError(e)) => {
                 self.progress_tracker.remove_progress(&file_id).await;
                 return Err(anyhow::anyhow!("Receiver error: {}", e.error));
             }
-            _ => {}
+            Ok(_) => {}
+            Err(e) => {
+                self.progress_tracker.remove_progress(&file_id).await;
+                return Err(e);
+            }
         }
 
         let _ = send.finish();

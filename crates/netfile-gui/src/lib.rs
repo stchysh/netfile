@@ -423,7 +423,8 @@ async fn update_config(
             let message_store = state.message_store.clone();
             let device_id = config.instance.instance_id.clone();
             let instance_name = config.instance.instance_name.clone();
-            let sc = SignalClient::new(device_id, instance_name, String::new(), new_signal_addr, message_store);
+            let transfer_port = state.transfer_service.local_port();
+            let sc = SignalClient::new(device_id, instance_name, format!("0.0.0.0:{}", transfer_port), new_signal_addr, message_store);
             if let Err(e) = sc.connect().await {
                 tracing::warn!("Signal connect failed: {}", e);
             } else {
@@ -445,10 +446,11 @@ async fn connect_signal_server(
 ) -> Result<(), String> {
     let config = state.config.read().await.clone();
     let message_store = state.message_store.clone();
+    let transfer_port = state.transfer_service.local_port();
     let sc = SignalClient::new(
         config.instance.instance_id.clone(),
         config.instance.instance_name.clone(),
-        String::new(),
+        format!("0.0.0.0:{}", transfer_port),
         server_addr,
         message_store,
     );
@@ -685,7 +687,7 @@ pub fn run() {
                     let sc = SignalClient::new(
                         config.instance.instance_id.clone(),
                         config.instance.instance_name.clone(),
-                        String::new(),
+                        format!("0.0.0.0:{}", transfer_port),
                         config.network.signal_server_addr.clone(),
                         message_store.clone(),
                     );

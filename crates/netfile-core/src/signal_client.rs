@@ -301,8 +301,15 @@ impl SignalClient {
 
                 if !observed_addr.is_empty() {
                     let current_addr = self.transfer_addr.read().await.clone();
-                    if current_addr.is_empty() {
-                        *self.transfer_addr.write().await = observed_addr;
+                    let port = current_addr
+                        .rsplit(':')
+                        .next()
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .unwrap_or(0);
+                    if port > 0 {
+                        let full_addr = format!("{}:{}", observed_addr, port);
+                        *self.transfer_addr.write().await = full_addr.clone();
+                        let _ = self.send_msg(&C2sMsg::UpdateTransferAddr { transfer_addr: full_addr }).await;
                     }
                 }
             }

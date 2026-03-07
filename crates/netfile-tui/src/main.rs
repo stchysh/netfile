@@ -119,6 +119,7 @@ async fn main() -> Result<()> {
             download_dir,
             config.transfer.enable_compression,
             config.transfer.speed_limit_mbps as u64 * 1024 * 1024,
+            config.transfer.quic_stream_window_mb,
         )
         .await?,
     );

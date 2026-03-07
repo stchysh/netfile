@@ -23,6 +23,7 @@ interface Config {
     download_dir: string
     speed_limit_mbps: number
     require_confirmation: boolean
+    quic_stream_window_mb: number
   }
   security: {
     require_auth: boolean
@@ -299,7 +300,7 @@ function Settings({ onClose }: Props) {
               <input
                 type="range"
                 min={65536}
-                max={8388608}
+                max={16777216}
                 step={65536}
                 value={config.transfer.chunk_size}
                 onChange={(e) =>
@@ -308,6 +309,28 @@ function Settings({ onClose }: Props) {
                     transfer: {
                       ...config.transfer,
                       chunk_size: parseInt(e.target.value),
+                    },
+                  })
+                }
+              />
+            </div>
+            <div className="form-group">
+              <div className="slider-label-row">
+                <label>QUIC 流控窗口 <span style={{fontSize:'0.8em', color:'var(--text-muted, #888)'}}>重启后生效</span></label>
+                <span className="slider-value">{config.transfer.quic_stream_window_mb ?? 32} MB</span>
+              </div>
+              <input
+                type="range"
+                min={8}
+                max={256}
+                step={8}
+                value={config.transfer.quic_stream_window_mb ?? 32}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    transfer: {
+                      ...config.transfer,
+                      quic_stream_window_mb: parseInt(e.target.value),
                     },
                   })
                 }

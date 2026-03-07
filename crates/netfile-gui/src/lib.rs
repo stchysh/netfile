@@ -692,6 +692,7 @@ pub fn run() {
                         download_dir.clone(),
                         config.transfer.enable_compression,
                         speed_limit_bytes_per_sec,
+                        config.transfer.quic_stream_window_mb,
                     )
                     .await
                     .expect("Failed to create transfer service"),

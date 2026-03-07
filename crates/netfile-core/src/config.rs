@@ -48,6 +48,8 @@ pub struct TransferConfig {
     pub require_confirmation: bool,
     #[serde(default = "default_iroh_stream_count")]
     pub iroh_stream_count: u32,
+    #[serde(default = "default_quic_stream_window_mb")]
+    pub quic_stream_window_mb: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +128,10 @@ fn default_iroh_stream_count() -> u32 {
     4
 }
 
+fn default_quic_stream_window_mb() -> u32 {
+    32
+}
+
 fn default_require_auth() -> bool {
     true
 }
@@ -172,6 +178,7 @@ impl Default for TransferConfig {
             speed_limit_mbps: 0,
             require_confirmation: true,
             iroh_stream_count: default_iroh_stream_count(),
+            quic_stream_window_mb: default_quic_stream_window_mb(),
         }
     }
 }

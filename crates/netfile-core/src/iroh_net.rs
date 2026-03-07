@@ -13,7 +13,7 @@ pub struct IrohManager {
 }
 
 impl IrohManager {
-    pub async fn new(data_dir: PathBuf) -> Result<Arc<Self>> {
+    pub async fn new(data_dir: PathBuf, stream_window_mb: u32) -> Result<Arc<Self>> {
         let key_dir = data_dir.join("iroh");
         tokio::fs::create_dir_all(&key_dir).await?;
         let key_path = key_dir.join("secret_key");
@@ -36,12 +36,13 @@ impl IrohManager {
             k
         };
 
-        // 32MB per-stream window, 64MB connection window, 120s idle timeout, 15s keepalive.
-        // Default Quinn window (~1MB) causes 30-60s stalls per chunk on slow NAT links.
+        let stream_window_bytes = stream_window_mb.max(8).min(256) as u64 * 1024 * 1024;
+        let conn_window_bytes = stream_window_bytes * 2;
+        info!("iroh QUIC window: stream={}MB conn={}MB", stream_window_bytes / 1024 / 1024, conn_window_bytes / 1024 / 1024);
         let transport_config = QuicTransportConfig::builder()
-            .stream_receive_window(VarInt::from_u32(32 * 1024 * 1024))
-            .receive_window(VarInt::from_u32(64 * 1024 * 1024))
-            .send_window(64 * 1024 * 1024u64)
+            .stream_receive_window(VarInt::try_from(stream_window_bytes).unwrap_or(VarInt::from_u32(32 * 1024 * 1024)))
+            .receive_window(VarInt::try_from(conn_window_bytes).unwrap_or(VarInt::from_u32(64 * 1024 * 1024)))
+            .send_window(conn_window_bytes)
             .max_idle_timeout(Some(VarInt::from_u32(120_000).into()))
             .keep_alive_interval(Duration::from_secs(15))
             .build();

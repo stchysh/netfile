@@ -47,7 +47,7 @@ impl TransferService {
         data_dir: PathBuf,
         download_dir: PathBuf,
     ) -> Result<Self> {
-        Self::new_with_compression(transfer_port, max_concurrent, chunk_size, data_dir, download_dir, false, 0).await
+        Self::new_with_compression(transfer_port, max_concurrent, chunk_size, data_dir, download_dir, false, 0, 32).await
     }
 
     pub async fn new_with_compression(
@@ -58,6 +58,7 @@ impl TransferService {
         download_dir: PathBuf,
         enable_compression: bool,
         speed_limit_bytes_per_sec: u64,
+        quic_stream_window_mb: u32,
     ) -> Result<Self> {
         let port = if transfer_port == 0 {
             Self::find_available_port().await?
@@ -66,7 +67,7 @@ impl TransferService {
         };
 
         let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        let iroh_manager = IrohManager::new(data_dir.clone()).await?;
+        let iroh_manager = IrohManager::new(data_dir.clone(), quic_stream_window_mb).await?;
 
         info!("Transfer service listening on port {} (TCP + iroh)", port);
 

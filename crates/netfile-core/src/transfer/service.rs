@@ -2,7 +2,7 @@ use super::file_transfer::FileReceiver;
 use super::history::{HistoryStore, TransferRecord};
 use sha2::{Digest, Sha256};
 use super::progress::ProgressTracker;
-use crate::protocol::{Message, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
+use crate::protocol::{DataStreamHeader, Message, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
 use crate::message_store::{ChatMessage, MessageStore};
 use crate::iroh_net::IrohManager;
 use anyhow::Result;
@@ -11,9 +11,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, RwLock, Semaphore};
+use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -132,18 +133,279 @@ impl TransferService {
                     },
                     Err(e) => { error!("iroh accept error: {}", e); return; }
                 };
-                match conn.accept_bi().await {
-                    Ok((mut send, mut recv)) => {
-                        if let Err(e) = service.handle_connection(&mut send, &mut recv, "iroh").await {
-                            debug!("iroh connection ended: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        debug!("iroh accept_bi error: {}", e);
-                    }
+                // Per-connection routing table for multi-stream data streams:
+                // file_id -> Vec of senders (one per data stream)
+                let data_routes: Arc<RwLock<HashMap<String, Vec<mpsc::Sender<(u32, bool, Vec<u8>)>>>>> =
+                    Arc::new(RwLock::new(HashMap::new()));
+                loop {
+                    let (send, recv) = match conn.accept_bi().await {
+                        Ok(s) => s,
+                        Err(e) => { debug!("iroh connection closed: {}", e); break; }
+                    };
+                    let svc = service.clone();
+                    let routes = data_routes.clone();
+                    tokio::spawn(async move {
+                        svc.handle_iroh_stream(send, recv, routes).await;
+                    });
                 }
             });
         }
+    }
+
+    async fn handle_iroh_stream<S, R>(
+        &self,
+        mut send: S,
+        mut recv: R,
+        data_routes: Arc<RwLock<HashMap<String, Vec<mpsc::Sender<(u32, bool, Vec<u8>)>>>>>,
+    ) where
+        S: AsyncWrite + Unpin + Send + 'static,
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        let msg = match Self::read_msg(&mut recv).await {
+            Ok(m) => m,
+            Err(e) => { debug!("[recv/iroh] read first msg error: {}", e); return; }
+        };
+        match msg {
+            Message::TransferRequest(req) => {
+                let stream_count = req.stream_count.unwrap_or(1);
+                if stream_count > 1 {
+                    if let Err(e) = self.handle_iroh_multi_control(&mut send, &mut recv, req, data_routes).await {
+                        warn!("[recv/iroh/multi] control error: {}", e);
+                    }
+                } else if let Err(e) = self.handle_transfer_request(&mut send, &mut recv, req, "iroh").await {
+                    debug!("[recv/iroh] transfer error: {}", e);
+                }
+            }
+            Message::DataStreamHeader(h) => {
+                let tx_opt = {
+                    let routes = data_routes.read().await;
+                    routes.get(&h.file_id).and_then(|v| v.get(h.stream_index as usize).cloned())
+                };
+                if let Some(tx) = tx_opt {
+                    loop {
+                        match Self::read_chunk_raw(&mut recv).await {
+                            Ok((chunk_index, compressed, data)) => {
+                                if tx.send((chunk_index, compressed, data)).await.is_err() { break; }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                } else {
+                    warn!("[recv/iroh/multi] no route for file_id={} stream={}", h.file_id, h.stream_index);
+                }
+            }
+            Message::TextMessage(msg) => {
+                let _ = self.handle_text_message(&mut send, msg).await;
+            }
+            _ => { warn!("[recv/iroh] unexpected first message on stream"); }
+        }
+    }
+
+    async fn handle_iroh_multi_control<S, R>(
+        &self,
+        send: &mut S,
+        recv: &mut R,
+        request: TransferRequest,
+        data_routes: Arc<RwLock<HashMap<String, Vec<mpsc::Sender<(u32, bool, Vec<u8>)>>>>>,
+    ) -> Result<()>
+    where
+        S: AsyncWrite + Unpin,
+        R: AsyncRead + Unpin,
+    {
+        let file_id = request.file_id.clone();
+        let file_size = request.file_size;
+        let chunk_size = request.chunk_size;
+        let stream_count = request.stream_count.unwrap_or(1);
+        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+        let progress_id = format!("recv:{}", file_id);
+
+        info!(
+            "[recv/iroh/multi] request: file_id={} name={:?} size={} streams={}",
+            file_id, request.file_name, file_size, stream_count
+        );
+
+        if *self.require_confirmation.read().await {
+            self.progress_tracker
+                .register_pending_confirm(progress_id.clone(), request.file_name.clone(), file_size)
+                .await;
+            self.progress_tracker.set_transfer_method(&progress_id, "iroh").await;
+            let (tx, rx) = oneshot::channel();
+            self.pending_confirmations.write().await.insert(progress_id.clone(), tx);
+            let accepted = rx.await.unwrap_or(false);
+            self.progress_tracker.remove_progress(&progress_id).await;
+            if !accepted {
+                info!("[recv/iroh/multi] user rejected: {}", file_id);
+                let _ = Self::write_msg(send, &Message::TransferResponse(TransferResponse {
+                    file_id: file_id.clone(),
+                    accepted: false,
+                    save_path: None,
+                    resume_from_chunk: None,
+                })).await;
+                return Ok(());
+            }
+            info!("[recv/iroh/multi] user accepted: {}", file_id);
+        }
+
+        let download_dir = self.download_dir.read().await.clone();
+        let temp_file_path = self.data_dir.join("temp").join(format!("{}.tmp", file_id));
+        let final_path = if let Some(rel) = &request.relative_path {
+            download_dir.join(rel)
+        } else {
+            download_dir.join(&request.file_name)
+        };
+
+        if let Some(p) = temp_file_path.parent() { tokio::fs::create_dir_all(p).await?; }
+        if let Some(p) = final_path.parent() { tokio::fs::create_dir_all(p).await?; }
+
+        {
+            let f = tokio::fs::File::create(&temp_file_path).await?;
+            f.set_len(file_size).await?;
+        }
+
+        // Setup channels and routing table before sending response
+        let mut channel_senders = Vec::with_capacity(stream_count as usize);
+        let mut channel_receivers = Vec::with_capacity(stream_count as usize);
+        for _ in 0..stream_count {
+            let (tx, rx) = mpsc::channel::<(u32, bool, Vec<u8>)>(16);
+            channel_senders.push(tx);
+            channel_receivers.push(rx);
+        }
+        data_routes.write().await.insert(file_id.clone(), channel_senders);
+
+        self.progress_tracker
+            .start_transfer(progress_id.clone(), request.file_name.clone(), file_size, total_chunks, "receive".to_string())
+            .await;
+        self.progress_tracker.set_transfer_method(&progress_id, "iroh").await;
+        self.progress_tracker.set_active(&progress_id).await;
+
+        if let Err(e) = Self::write_msg(send, &Message::TransferResponse(TransferResponse {
+            file_id: file_id.clone(),
+            accepted: true,
+            save_path: Some(download_dir.to_string_lossy().to_string()),
+            resume_from_chunk: None,
+        })).await {
+            data_routes.write().await.remove(&file_id);
+            self.progress_tracker.remove_progress(&progress_id).await;
+            let _ = tokio::fs::remove_file(&temp_file_path).await;
+            return Err(e);
+        }
+
+        // Spawn writer tasks — each opens its own file handle and writes at chunk offsets
+        let mut writer_set: JoinSet<Result<()>> = JoinSet::new();
+        for rx in channel_receivers {
+            let temp_path = temp_file_path.clone();
+            let chunk_size_u64 = chunk_size as u64;
+            let tracker = self.progress_tracker.clone();
+            let pid = progress_id.clone();
+            let fid = file_id.clone();
+            writer_set.spawn(async move {
+                let mut file = tokio::fs::OpenOptions::new().write(true).open(&temp_path).await?;
+                let mut rx = rx;
+                while let Some((chunk_index, compressed, data)) = rx.recv().await {
+                    let write_data = if compressed {
+                        crate::compression::Compressor::decompress(&data)?
+                    } else {
+                        data
+                    };
+                    let offset = chunk_index as u64 * chunk_size_u64;
+                    file.seek(std::io::SeekFrom::Start(offset)).await?;
+                    file.write_all(&write_data).await?;
+                    tracker.update_progress(&pid, write_data.len() as u64).await;
+                }
+                debug!("[recv/iroh/multi] writer task done for {}", fid);
+                Ok(())
+            });
+        }
+
+        while let Some(result) = writer_set.join_next().await {
+            match result {
+                Err(e) => error!("[recv/iroh/multi] writer task panicked: {:?}", e),
+                Ok(Err(e)) => error!("[recv/iroh/multi] writer error: {}", e),
+                Ok(Ok(())) => {}
+            }
+        }
+
+        data_routes.write().await.remove(&file_id);
+
+        // Read TransferComplete from control stream
+        let tc = match Self::read_msg(recv).await {
+            Ok(Message::TransferComplete(tc)) => tc,
+            Ok(_) => {
+                self.progress_tracker.remove_progress(&progress_id).await;
+                let _ = tokio::fs::remove_file(&temp_file_path).await;
+                return Err(anyhow::anyhow!("expected TransferComplete"));
+            }
+            Err(e) => {
+                self.progress_tracker.remove_progress(&progress_id).await;
+                let _ = tokio::fs::remove_file(&temp_file_path).await;
+                return Err(e);
+            }
+        };
+
+        // Compute hash from assembled temp file
+        let actual_hash = {
+            let mut hasher = Sha256::new();
+            let mut f = tokio::fs::File::open(&temp_file_path).await?;
+            let mut buf = vec![0u8; 4 * 1024 * 1024];
+            loop {
+                let n = f.read(&mut buf).await?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+            }
+            let r = hasher.finalize();
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&r);
+            hash
+        };
+
+        if actual_hash != tc.file_hash {
+            error!("[recv/iroh/multi] hash mismatch for {}", file_id);
+            let _ = Self::write_msg(send, &Message::TransferError(TransferError {
+                file_id: file_id.clone(),
+                error: "File hash mismatch".to_string(),
+            })).await;
+            self.progress_tracker.remove_progress(&progress_id).await;
+            let _ = tokio::fs::remove_file(&temp_file_path).await;
+            return Err(anyhow::anyhow!("File hash mismatch"));
+        }
+
+        if tokio::fs::rename(&temp_file_path, &final_path).await.is_err() {
+            tokio::fs::copy(&temp_file_path, &final_path).await?;
+            tokio::fs::remove_file(&temp_file_path).await?;
+        }
+
+        if let Err(e) = Self::write_msg(send, &Message::TransferComplete(TransferComplete {
+            file_id: file_id.clone(),
+            file_hash: tc.file_hash,
+        })).await {
+            self.progress_tracker.remove_progress(&progress_id).await;
+            return Err(e);
+        }
+
+        let (elapsed, method) = self.progress_tracker.get_progress(&progress_id).await
+            .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
+            .unwrap_or((0, None));
+        self.progress_tracker.remove_progress(&progress_id).await;
+
+        info!("[recv/iroh/multi] completed file_id={} name={:?} size={} elapsed={}s",
+            file_id, request.file_name, file_size, elapsed);
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let _ = self.history_store.add_record(TransferRecord {
+            id: Uuid::new_v4().to_string(),
+            file_name: request.file_name.clone(),
+            file_size,
+            direction: "receive".to_string(),
+            status: "completed".to_string(),
+            error: None,
+            timestamp: ts,
+            elapsed_secs: elapsed,
+            save_path: Some(final_path.to_string_lossy().to_string()),
+            transfer_method: method,
+        }).await;
+
+        Ok(())
     }
 
     async fn accept_tcp_loop(&self) {
@@ -679,6 +941,118 @@ impl TransferService {
         self.send_folder_via_iroh(folder_path, endpoint_addr, enable_compression).await
     }
 
+    // Opens N data bi-streams on conn, reads file sequentially (computing hash + distributing
+    // chunks round-robin), sends in parallel. Returns the file hash.
+    async fn send_data_streams(
+        &self,
+        conn: &iroh::endpoint::Connection,
+        file_path: &PathBuf,
+        file_id: &str,
+        file_size: u64,
+        chunk_size: u32,
+        total_chunks: u32,
+        enable_compression: bool,
+        speed_limit_bytes_per_sec: u64,
+        n_streams: u32,
+    ) -> Result<[u8; 32]> {
+        let n = n_streams as usize;
+
+        // Open N data bi-streams and send DataStreamHeader on each
+        let mut data_sends = Vec::with_capacity(n);
+        for i in 0..n {
+            let (mut ds_send, _ds_recv) = conn.open_bi().await
+                .map_err(|e| anyhow::anyhow!("open data stream {} failed: {}", i, e))?;
+            Self::write_msg(&mut ds_send, &Message::DataStreamHeader(DataStreamHeader {
+                file_id: file_id.to_string(),
+                stream_index: i as u32,
+            })).await?;
+            data_sends.push(ds_send);
+        }
+
+        // Per-stream channels: (chunk_index, compressed, data)
+        let mut txs: Vec<mpsc::Sender<(u32, bool, Vec<u8>)>> = Vec::with_capacity(n);
+        let mut rxs: Vec<mpsc::Receiver<(u32, bool, Vec<u8>)>> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (tx, rx) = mpsc::channel(8);
+            txs.push(tx);
+            rxs.push(rx);
+        }
+
+        // Spawn data sender tasks
+        let mut sender_set: JoinSet<Result<()>> = JoinSet::new();
+        for (mut ds_send, rx) in data_sends.into_iter().zip(rxs.into_iter()) {
+            let mut rx = rx;
+            sender_set.spawn(async move {
+                while let Some((chunk_index, compressed, data)) = rx.recv().await {
+                    Self::write_chunk_raw(&mut ds_send, chunk_index, compressed, &data).await?;
+                }
+                Ok(())
+            });
+        }
+
+        // File reader task: sequential read, hash, round-robin distribute
+        let file_path = file_path.clone();
+        let progress_tracker = self.progress_tracker.clone();
+        let file_id_str = file_id.to_string();
+        let reader = tokio::spawn(async move {
+            let mut file = tokio::fs::File::open(&file_path).await
+                .map_err(|e| anyhow::anyhow!("open file failed: {}", e))?;
+            let mut hasher = Sha256::new();
+
+            for chunk_index in 0..total_chunks {
+                let offset = chunk_index as u64 * chunk_size as u64;
+                let remaining = file_size - offset;
+                let read_size = (chunk_size as u64).min(remaining) as usize;
+                let mut buffer = vec![0u8; read_size];
+                file.read_exact(&mut buffer).await
+                    .map_err(|e| anyhow::anyhow!("read chunk {} failed: {}", chunk_index, e))?;
+                hasher.update(&buffer);
+
+                let (send_data, compressed) = if enable_compression && buffer.len() > 1024 {
+                    match crate::compression::Compressor::compress(&buffer) {
+                        Ok(c) if c.len() < buffer.len() => (c, true),
+                        _ => (buffer, false),
+                    }
+                } else {
+                    (buffer, false)
+                };
+
+                let bytes_len = send_data.len() as u64;
+                let stream_idx = (chunk_index as usize) % n;
+                if txs[stream_idx].send((chunk_index, compressed, send_data)).await.is_err() {
+                    return Err(anyhow::anyhow!("data stream {} channel closed", stream_idx));
+                }
+
+                progress_tracker.update_progress(&file_id_str, bytes_len).await;
+
+                if speed_limit_bytes_per_sec > 0 {
+                    let delay = (bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+                    tokio::time::sleep(tokio::time::Duration::from_micros(delay)).await;
+                }
+            }
+
+            drop(txs); // signal sender tasks to finish
+            let r = hasher.finalize();
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&r);
+            Ok::<[u8; 32], anyhow::Error>(hash)
+        });
+
+        // Wait for reader, then all senders
+        let file_hash = reader.await
+            .map_err(|e| anyhow::anyhow!("reader task panicked: {:?}", e))??;
+
+        while let Some(result) = sender_set.join_next().await {
+            match result {
+                Err(e) => warn!("[send/iroh/multi] sender task panicked: {:?}", e),
+                Ok(Err(e)) => warn!("[send/iroh/multi] sender error: {}", e),
+                Ok(Ok(())) => {}
+            }
+        }
+
+        Ok(file_hash)
+    }
+
     async fn iroh_get_or_connect(&self, endpoint_addr: iroh::EndpointAddr) -> Result<iroh::endpoint::Connection> {
         let id = endpoint_addr.id;
         {
@@ -758,6 +1132,7 @@ impl TransferService {
             chunk_size,
             device_id: String::new(),
             password_hash: None,
+            stream_count: None,
         };
 
         let stream = match TcpStream::connect(target_addr).await {
@@ -982,6 +1357,7 @@ impl TransferService {
             chunk_size,
             device_id: String::new(),
             password_hash: None,
+            stream_count: None,
         };
 
         let stream = TcpStream::connect(target_addr).await?;
@@ -1102,6 +1478,10 @@ impl TransferService {
             r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
         };
 
+        const MULTI_STREAM_THRESHOLD: u64 = 8 * 1024 * 1024;
+        const MULTI_STREAM_COUNT: u32 = 4;
+        let n_streams = if file_size >= MULTI_STREAM_THRESHOLD { MULTI_STREAM_COUNT } else { 1 };
+
         let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
 
         self.progress_tracker
@@ -1116,8 +1496,8 @@ impl TransferService {
         self.progress_tracker.set_transfer_method(&file_id, METHOD).await;
 
         info!(
-            "[send/iroh] start file_id={} name={:?} size={} chunks={}",
-            file_id, file_name, file_size, total_chunks
+            "[send/iroh] start file_id={} name={:?} size={} chunks={} streams={}",
+            file_id, file_name, file_size, total_chunks, n_streams
         );
 
         let request = TransferRequest {
@@ -1128,6 +1508,7 @@ impl TransferService {
             chunk_size,
             device_id: String::new(),
             password_hash: None,
+            stream_count: if n_streams > 1 { Some(n_streams) } else { None },
         };
 
         let conn = match self.iroh_get_or_connect(endpoint_addr).await {
@@ -1197,81 +1578,104 @@ impl TransferService {
 
         self.progress_tracker.set_active(&file_id).await;
 
-        let mut file = match tokio::fs::File::open(&file_path).await {
-            Ok(f) => f,
-            Err(e) => {
-                self.progress_tracker.remove_progress(&file_id).await;
-                return Err(e.into());
+        let file_hash = if n_streams > 1 {
+            info!("[send/iroh/multi] starting {} streams for {}", n_streams, file_id);
+            match self.send_data_streams(
+                &conn,
+                &file_path,
+                &file_id,
+                file_size,
+                chunk_size,
+                total_chunks,
+                enable_compression,
+                speed_limit_bytes_per_sec,
+                n_streams,
+            ).await {
+                Ok(h) => h,
+                Err(e) => {
+                    error!("[send/iroh/multi] send_data_streams failed for {}: {}", file_id, e);
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e);
+                }
             }
-        };
-        let mut hasher = Sha256::new();
-
-        if resume_from > 0 {
-            let skip_bytes = resume_from as u64 * chunk_size as u64;
-            let mut remaining_skip = skip_bytes;
-            let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
-            while remaining_skip > 0 {
-                let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
-                if let Err(e) = file.read_exact(&mut skip_buf[..read_size]).await {
+        } else {
+            let mut file = match tokio::fs::File::open(&file_path).await {
+                Ok(f) => f,
+                Err(e) => {
                     self.progress_tracker.remove_progress(&file_id).await;
                     return Err(e.into());
                 }
-                hasher.update(&skip_buf[..read_size]);
-                remaining_skip -= read_size as u64;
-            }
-        }
-
-        for chunk_index in resume_from..total_chunks {
-            if self.cancelled.read().await.contains(&file_id) {
-                self.progress_tracker.remove_progress(&file_id).await;
-                self.cancelled.write().await.remove(&file_id);
-                info!("Transfer cancelled: {}", file_id);
-                return Ok(file_id);
-            }
-
-            loop {
-                if !self.paused.read().await.contains(&file_id) { break; }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-
-            let offset = chunk_index as u64 * chunk_size as u64;
-            let remaining = file_size - offset;
-            let read_size = (chunk_size as u64).min(remaining) as usize;
-            let mut buffer = vec![0u8; read_size];
-            if let Err(e) = file.read_exact(&mut buffer).await {
-                error!("[send/iroh] file read error at chunk {} for {}: {}", chunk_index, file_id, e);
-                self.progress_tracker.remove_progress(&file_id).await;
-                return Err(e.into());
-            }
-
-            hasher.update(&buffer);
-
-            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
-                match crate::compression::Compressor::compress(&buffer) {
-                    Ok(c) if c.len() < buffer.len() => (c, true),
-                    _ => (buffer, false),
-                }
-            } else {
-                (buffer, false)
             };
+            let mut hasher = Sha256::new();
 
-            let chunk_bytes_len = send_data.len() as u64;
-            if let Err(e) = Self::write_chunk_raw(&mut send, chunk_index, compressed, &send_data).await {
-                error!("[send/iroh] chunk write error at chunk {} for {}: {}", chunk_index, file_id, e);
-                self.progress_tracker.remove_progress(&file_id).await;
-                return Err(e);
+            if resume_from > 0 {
+                let skip_bytes = resume_from as u64 * chunk_size as u64;
+                let mut remaining_skip = skip_bytes;
+                let mut skip_buf = vec![0u8; 4 * 1024 * 1024];
+                while remaining_skip > 0 {
+                    let read_size = (skip_buf.len() as u64).min(remaining_skip) as usize;
+                    if let Err(e) = file.read_exact(&mut skip_buf[..read_size]).await {
+                        self.progress_tracker.remove_progress(&file_id).await;
+                        return Err(e.into());
+                    }
+                    hasher.update(&skip_buf[..read_size]);
+                    remaining_skip -= read_size as u64;
+                }
             }
-            self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
 
-            if speed_limit_bytes_per_sec > 0 {
-                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
-                tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
+            for chunk_index in resume_from..total_chunks {
+                if self.cancelled.read().await.contains(&file_id) {
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    self.cancelled.write().await.remove(&file_id);
+                    info!("Transfer cancelled: {}", file_id);
+                    return Ok(file_id);
+                }
+
+                loop {
+                    if !self.paused.read().await.contains(&file_id) { break; }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+
+                let offset = chunk_index as u64 * chunk_size as u64;
+                let remaining = file_size - offset;
+                let read_size = (chunk_size as u64).min(remaining) as usize;
+                let mut buffer = vec![0u8; read_size];
+                if let Err(e) = file.read_exact(&mut buffer).await {
+                    error!("[send/iroh] file read error at chunk {} for {}: {}", chunk_index, file_id, e);
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e.into());
+                }
+
+                hasher.update(&buffer);
+
+                let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+                    match crate::compression::Compressor::compress(&buffer) {
+                        Ok(c) if c.len() < buffer.len() => (c, true),
+                        _ => (buffer, false),
+                    }
+                } else {
+                    (buffer, false)
+                };
+
+                let chunk_bytes_len = send_data.len() as u64;
+                if let Err(e) = Self::write_chunk_raw(&mut send, chunk_index, compressed, &send_data).await {
+                    error!("[send/iroh] chunk write error at chunk {} for {}: {}", chunk_index, file_id, e);
+                    self.progress_tracker.remove_progress(&file_id).await;
+                    return Err(e);
+                }
+                self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
+
+                if speed_limit_bytes_per_sec > 0 {
+                    let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+                    tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
+                }
             }
-        }
 
-        let hash_result = hasher.finalize();
-        let mut file_hash = [0u8; 32];
-        file_hash.copy_from_slice(&hash_result);
+            let hash_result = hasher.finalize();
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&hash_result);
+            h
+        };
 
         if let Err(e) = Self::write_msg(&mut send, &Message::TransferComplete(TransferComplete {
             file_id: file_id.clone(),
@@ -1361,6 +1765,7 @@ impl TransferService {
             chunk_size,
             device_id: String::new(),
             password_hash: None,
+            stream_count: None,
         };
 
         let conn = self.iroh_get_or_connect(endpoint_addr).await?;

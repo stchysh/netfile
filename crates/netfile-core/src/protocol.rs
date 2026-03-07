@@ -13,6 +13,7 @@ pub enum Message {
     AuthResponse(AuthResponse),
     TextMessage(TextMessage),
     TextAck(TextAck),
+    DataStreamHeader(DataStreamHeader),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +25,14 @@ pub struct TransferRequest {
     pub chunk_size: u32,
     pub device_id: String,
     pub password_hash: Option<String>,
+    #[serde(default)]
+    pub stream_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataStreamHeader {
+    pub file_id: String,
+    pub stream_index: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

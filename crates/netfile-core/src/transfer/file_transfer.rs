@@ -59,6 +59,7 @@ impl FileSender {
             chunk_size: self.chunk_size,
             device_id: String::new(),
             password_hash: None,
+            stream_count: None,
         })
     }
 

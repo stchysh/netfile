@@ -1,0 +1,20 @@
+FROM rust:bookworm AS builder
+
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN cargo build --locked --release -p netfile-signal \
+    && cargo build --locked --release -p netfile-core --example test_dual_nat_peer
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /workspace/target/release/netfile-signal /usr/local/bin/netfile-signal
+COPY --from=builder /workspace/target/release/examples/test_dual_nat_peer /usr/local/bin/test-dual-nat-peer
+COPY docker/dual-nat/peer-entrypoint.sh /usr/local/bin/peer-entrypoint.sh
+
+RUN chmod +x /usr/local/bin/peer-entrypoint.sh

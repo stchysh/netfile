@@ -1,7 +1,6 @@
 use super::file_transfer::FileReceiver;
 use super::history::{HistoryStore, TransferRecord};
 use sha2::{Digest, Sha256};
-use super::task_queue::{TaskQueue, TransferTask};
 use super::progress::ProgressTracker;
 use crate::protocol::{Message, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
 use crate::message_store::{ChatMessage, MessageStore};
@@ -23,7 +22,6 @@ pub struct TransferService {
     iroh_manager: Arc<IrohManager>,
     transfer_port: u16,
     iroh_conn_cache: Arc<RwLock<HashMap<iroh::EndpointId, iroh::endpoint::Connection>>>,
-    task_queue: Arc<TaskQueue>,
     progress_tracker: Arc<ProgressTracker>,
     cancelled: Arc<RwLock<HashSet<String>>>,
     paused: Arc<RwLock<HashSet<String>>>,
@@ -79,7 +77,6 @@ impl TransferService {
             iroh_manager,
             transfer_port: port,
             iroh_conn_cache: Arc::new(RwLock::new(HashMap::new())),
-            task_queue: Arc::new(TaskQueue::new(max_concurrent)),
             progress_tracker: Arc::new(ProgressTracker::new()),
             cancelled: Arc::new(RwLock::new(HashSet::new())),
             paused: Arc::new(RwLock::new(HashSet::new())),
@@ -121,14 +118,7 @@ impl TransferService {
             })
         };
 
-        let process_task = {
-            let service = self.clone();
-            tokio::spawn(async move {
-                service.process_queue_loop().await;
-            })
-        };
-
-        let _ = tokio::join!(accept_iroh_task, accept_tcp_task, process_task);
+        let _ = tokio::join!(accept_iroh_task, accept_tcp_task);
     }
 
     async fn accept_iroh_loop(&self) {
@@ -440,32 +430,6 @@ impl TransferService {
         Self::write_msg(send, &Message::TextAck(TextAck {
             message_id: msg.id,
         })).await?;
-        Ok(())
-    }
-
-    async fn process_queue_loop(&self) {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
-        loop {
-            interval.tick().await;
-
-            if !self.task_queue.can_start_new().await {
-                continue;
-            }
-
-            if let Some(task) = self.task_queue.get_next_pending().await {
-                let service = Arc::new(self.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = service.process_task(task).await {
-                        error!("Failed to process task: {}", e);
-                    }
-                });
-            }
-        }
-    }
-
-    async fn process_task(&self, task: TransferTask) -> Result<()> {
-        info!("Processing task: {} -> {}", task.file_name, task.target_device);
-        self.task_queue.complete_task(&task.task_id).await;
         Ok(())
     }
 
@@ -845,7 +809,7 @@ impl TransferService {
 
             loop {
                 if !self.paused.read().await.contains(&file_id) { break; }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             let offset = chunk_index as u64 * chunk_size as u64;
@@ -1010,7 +974,7 @@ impl TransferService {
 
             loop {
                 if !self.paused.read().await.contains(folder_id) { break; }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             let offset = chunk_index as u64 * chunk_size as u64;
@@ -1198,7 +1162,7 @@ impl TransferService {
 
             loop {
                 if !self.paused.read().await.contains(&file_id) { break; }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             let offset = chunk_index as u64 * chunk_size as u64;
@@ -1364,7 +1328,7 @@ impl TransferService {
 
             loop {
                 if !self.paused.read().await.contains(folder_id) { break; }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             let offset = chunk_index as u64 * chunk_size as u64;
@@ -1510,7 +1474,6 @@ impl TransferService {
     }
 
     pub async fn update_max_concurrent(&self, n: usize) {
-        self.task_queue.update_max_concurrent(n).await;
         *self.semaphore.write().await = Arc::new(Semaphore::new(n));
     }
 
@@ -1544,10 +1507,6 @@ impl TransferService {
         self.iroh_manager.clone()
     }
 
-    pub fn task_queue(&self) -> Arc<TaskQueue> {
-        self.task_queue.clone()
-    }
-
     pub fn message_store(&self) -> Arc<MessageStore> {
         self.message_store.clone()
     }
@@ -1564,7 +1523,6 @@ impl Clone for TransferService {
             iroh_manager: self.iroh_manager.clone(),
             transfer_port: self.transfer_port,
             iroh_conn_cache: self.iroh_conn_cache.clone(),
-            task_queue: self.task_queue.clone(),
             progress_tracker: self.progress_tracker.clone(),
             cancelled: self.cancelled.clone(),
             paused: self.paused.clone(),

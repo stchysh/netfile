@@ -19,6 +19,7 @@ pub struct AppState {
     pub history_store: Arc<HistoryStore>,
     pub signal_client: Arc<RwLock<Option<Arc<SignalClient>>>>,
     pub iroh_manager: Arc<IrohManager>,
+    pub iroh_watcher: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 fn is_lan_addr(addr: SocketAddr) -> bool {
@@ -431,7 +432,10 @@ async fn update_config(
                 let iroh_mgr = state.iroh_manager.clone();
                 let sc_clone = sc.clone();
                 *sc_guard = Some(sc);
-                spawn_iroh_addr_watcher(sc_clone, iroh_mgr);
+                let handle = spawn_iroh_addr_watcher(sc_clone, iroh_mgr);
+                let mut watcher = state.iroh_watcher.lock().await;
+                if let Some(old) = watcher.take() { old.abort(); }
+                *watcher = Some(handle);
             }
         }
     }
@@ -463,7 +467,10 @@ async fn connect_signal_server(
     }
     *guard = Some(sc);
     drop(guard);
-    spawn_iroh_addr_watcher(sc_clone, iroh_mgr);
+    let handle = spawn_iroh_addr_watcher(sc_clone, iroh_mgr);
+    let mut watcher = state.iroh_watcher.lock().await;
+    if let Some(old) = watcher.take() { old.abort(); }
+    *watcher = Some(handle);
     Ok(())
 }
 
@@ -533,25 +540,30 @@ async fn send_relay_message(
     }
 }
 
-fn spawn_iroh_addr_watcher(sc: Arc<SignalClient>, iroh_manager: Arc<IrohManager>) {
+fn spawn_iroh_addr_watcher(sc: Arc<SignalClient>, iroh_manager: Arc<IrohManager>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("iroh addr watcher started");
         iroh_manager.endpoint_ref().online().await;
         let addr = iroh_manager.endpoint_addr();
+        let mut last_addr_json = String::new();
         if let Ok(addr_json) = serde_json::to_string(&addr) {
             tracing::info!("initial iroh addr update");
-            sc.update_iroh_addr(addr_json).await;
+            sc.update_iroh_addr(addr_json.clone()).await;
+            last_addr_json = addr_json;
         }
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let addr = iroh_manager.endpoint_addr();
             if let Ok(addr_json) = serde_json::to_string(&addr) {
-                tracing::debug!("iroh addr watcher tick");
-                sc.update_iroh_addr(addr_json).await;
+                if addr_json != last_addr_json {
+                    tracing::debug!("iroh addr changed, updating");
+                    sc.update_iroh_addr(addr_json.clone()).await;
+                    last_addr_json = addr_json;
+                }
             }
         }
-    });
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -682,6 +694,8 @@ pub fn run() {
 
                 let signal_client: Arc<RwLock<Option<Arc<SignalClient>>>> =
                     Arc::new(RwLock::new(None));
+                let iroh_watcher: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+                    Arc::new(tokio::sync::Mutex::new(None));
 
                 if !config.network.signal_server_addr.is_empty() {
                     let sc = SignalClient::new(
@@ -692,7 +706,8 @@ pub fn run() {
                         message_store.clone(),
                     );
                     if let Ok(()) = sc.connect().await {
-                        spawn_iroh_addr_watcher(sc.clone(), iroh_manager.clone());
+                        let handle = spawn_iroh_addr_watcher(sc.clone(), iroh_manager.clone());
+                        *iroh_watcher.lock().await = Some(handle);
                         *signal_client.write().await = Some(sc);
                     }
                 }
@@ -705,6 +720,7 @@ pub fn run() {
                     history_store,
                     signal_client,
                     iroh_manager,
+                    iroh_watcher,
                 });
 
                 Ok(())

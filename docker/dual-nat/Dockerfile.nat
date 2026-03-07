@@ -1,0 +1,10 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iproute2 iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/dual-nat/nat-router.sh /usr/local/bin/nat-router.sh
+RUN chmod +x /usr/local/bin/nat-router.sh
+
+CMD ["/usr/local/bin/nat-router.sh", "eth0", "eth1"]

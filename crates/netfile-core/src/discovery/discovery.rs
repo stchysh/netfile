@@ -1,6 +1,7 @@
 use super::protocol::DiscoveryMessage;
 use crate::stun::StunClient;
 use anyhow::Result;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -180,7 +181,11 @@ impl DiscoveryService {
                     .as_secs();
             }
 
-            let known_peers: Vec<SocketAddr> = self.devices.read().await.values()
+            let known_peers: Vec<SocketAddr> = self
+                .devices
+                .read()
+                .await
+                .values()
                 .map(|d| SocketAddr::new(d.ip, d.discovery_port))
                 .collect();
 
@@ -209,7 +214,9 @@ impl DiscoveryService {
     }
 
     async fn send_unicast_to_peers(&self, peers: &[SocketAddr]) {
-        let Ok(data) = self.local_message.read().await.to_bytes() else { return };
+        let Ok(data) = self.local_message.read().await.to_bytes() else {
+            return;
+        };
         for &peer_addr in peers {
             let _ = self.socket.send_to(&data, peer_addr).await;
         }
@@ -242,9 +249,7 @@ impl DiscoveryService {
                 debug!("Received PUNCH_ACK from {}", addr);
                 Ok(())
             }
-            _ => {
-                self.handle_message(data, addr).await
-            }
+            _ => self.handle_message(data, addr).await,
         }
     }
 
@@ -262,7 +267,10 @@ impl DiscoveryService {
                     return Ok(());
                 }
             }
-            recv_ts.insert(message.instance_id.clone(), (message.timestamp, Instant::now()));
+            recv_ts.insert(
+                message.instance_id.clone(),
+                (message.timestamp, Instant::now()),
+            );
         }
 
         let device = Device {
@@ -339,7 +347,7 @@ impl DiscoveryService {
         drop(msg);
         devices.push(local_device);
 
-        devices
+        dedupe_devices(devices)
     }
 
     pub async fn update_device_info(&self, device_name: String, instance_name: String) {
@@ -375,5 +383,136 @@ impl DiscoveryService {
         self.socket.send_to(&msg, target_addr).await?;
         debug!("Sent PUNCH_REQUEST to {}", target_addr);
         Ok(())
+    }
+}
+
+fn dedupe_devices(devices: Vec<Device>) -> Vec<Device> {
+    let mut merged = HashMap::new();
+
+    for device in devices {
+        let key = if device.device_id.is_empty() {
+            device.instance_id.clone()
+        } else {
+            device.device_id.clone()
+        };
+
+        match merged.get(&key) {
+            Some(existing) if !should_replace_device(existing, &device) => {}
+            _ => {
+                merged.insert(key, device);
+            }
+        }
+    }
+
+    let mut devices: Vec<Device> = merged.into_values().collect();
+    devices.sort_by(|a, b| {
+        b.is_self
+            .cmp(&a.is_self)
+            .then_with(|| a.instance_name.cmp(&b.instance_name))
+            .then_with(|| a.device_name.cmp(&b.device_name))
+            .then_with(|| a.ip.to_string().cmp(&b.ip.to_string()))
+            .then_with(|| a.instance_id.cmp(&b.instance_id))
+    });
+    devices
+}
+
+fn should_replace_device(existing: &Device, candidate: &Device) -> bool {
+    match (existing.is_self, candidate.is_self) {
+        (false, true) => true,
+        (true, false) => false,
+        _ => match candidate.last_seen.cmp(&existing.last_seen) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => candidate.instance_id < existing.instance_id,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_device(
+        device_id: &str,
+        instance_id: &str,
+        instance_name: &str,
+        ip: [u8; 4],
+        is_self: bool,
+        seen_secs: u64,
+    ) -> Device {
+        Device {
+            device_id: device_id.to_string(),
+            instance_id: instance_id.to_string(),
+            device_name: "device".to_string(),
+            instance_name: instance_name.to_string(),
+            ip: IpAddr::V4(Ipv4Addr::from(ip)),
+            port: 37030,
+            version: "1.0.0".to_string(),
+            last_seen: SystemTime::UNIX_EPOCH + Duration::from_secs(seen_secs),
+            is_self,
+            public_transfer_addr: None,
+            discovery_port: 37020,
+        }
+    }
+
+    #[test]
+    fn dedupe_devices_prefers_self_entry() {
+        let devices = vec![
+            make_device(
+                "device-1",
+                "session-a",
+                "alpha",
+                [192, 168, 1, 24],
+                false,
+                10,
+            ),
+            make_device("device-1", "session-b", "alpha", [127, 0, 0, 1], true, 5),
+        ];
+
+        let deduped = dedupe_devices(devices);
+
+        assert_eq!(deduped.len(), 1);
+        assert!(deduped[0].is_self);
+        assert_eq!(deduped[0].instance_id, "session-b");
+    }
+
+    #[test]
+    fn dedupe_devices_keeps_latest_remote_session() {
+        let devices = vec![
+            make_device(
+                "device-1",
+                "session-a",
+                "alpha",
+                [192, 168, 1, 24],
+                false,
+                10,
+            ),
+            make_device(
+                "device-1",
+                "session-b",
+                "alpha",
+                [192, 168, 1, 24],
+                false,
+                20,
+            ),
+            make_device(
+                "device-2",
+                "session-c",
+                "beta",
+                [192, 168, 1, 99],
+                false,
+                15,
+            ),
+        ];
+
+        let deduped = dedupe_devices(devices);
+
+        assert_eq!(deduped.len(), 2);
+        assert!(deduped
+            .iter()
+            .any(|device| device.device_id == "device-1" && device.instance_id == "session-b"));
+        assert!(deduped
+            .iter()
+            .any(|device| device.device_id == "device-2" && device.instance_id == "session-c"));
     }
 }

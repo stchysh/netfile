@@ -112,6 +112,14 @@ function FileSender({ device, onClose, embedded }: Props) {
     const targetAddr = `${device.ip}:${device.port}`
     const publicAddr = device.public_transfer_addr
     const peerDiscoveryAddr = device.discovery_port ? `${device.ip}:${device.discovery_port}` : undefined
+    console.info('[punch-flow][ui] send_file invoked', {
+      targetAddr,
+      publicAddr,
+      peerDiscoveryAddr,
+      peerDeviceId: device.device_id || null,
+      compression: enableCompression,
+      files: selectedFiles.map((f) => f.path),
+    })
     for (const file of selectedFiles) {
       invoke('send_file', {
         targetAddr,
@@ -121,6 +129,19 @@ function FileSender({ device, onClose, embedded }: Props) {
         peerDiscoveryAddr,
         peerDeviceId: device.device_id || null,
       })
+        .then(() => {
+          console.info('[punch-flow][ui] send_file command accepted', {
+            filePath: file.path,
+            targetAddr,
+          })
+        })
+        .catch((error) => {
+          console.error('[punch-flow][ui] send_file command failed', {
+            filePath: file.path,
+            targetAddr,
+            error,
+          })
+        })
     }
     onClose()
   }

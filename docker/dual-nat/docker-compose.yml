@@ -1,0 +1,118 @@
+services:
+  signal:
+    image: netfile-dual-nat-runtime:latest
+    build:
+      context: ../..
+      dockerfile: docker/dual-nat/Dockerfile.netfile
+    command: ["netfile-signal", "--host", "0.0.0.0", "--port", "37200"]
+    networks:
+      wan:
+        ipv4_address: 172.20.0.2
+
+  nat_a:
+    image: netfile-dual-nat-router:latest
+    build:
+      context: ../..
+      dockerfile: docker/dual-nat/Dockerfile.nat
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      EXT_IP: 172.20.0.10
+    command: ["/usr/local/bin/nat-router.sh"]
+    networks:
+      wan:
+        ipv4_address: 172.20.0.10
+      lan_a:
+        ipv4_address: 10.10.1.1
+
+  nat_b:
+    image: netfile-dual-nat-router:latest
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      EXT_IP: 172.20.0.11
+    command: ["/usr/local/bin/nat-router.sh"]
+    networks:
+      wan:
+        ipv4_address: 172.20.0.11
+      lan_b:
+        ipv4_address: 10.10.2.1
+
+  peer_b:
+    image: netfile-dual-nat-runtime:latest
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - signal
+      - nat_b
+    entrypoint: ["/usr/local/bin/peer-entrypoint.sh"]
+    environment:
+      ROLE: receiver
+      SIGNAL_ADDR: 172.20.0.2:37200
+      DEVICE_ID: peer-b
+      TARGET_DEVICE_ID: peer-a
+      TRANSFER_PORT: 37051
+      TRANSFER_ADDR: 172.20.0.11:37051
+      NAT_TYPE: cone
+      PAYLOAD_NAME: dual_nat_payload.txt
+      PAYLOAD_CONTENT: hello-from-peer-a-through-double-nat
+      WAIT_TIMEOUT_SECS: 120
+      START_DELAY_SECS: 0
+      DATA_ROOT: /tmp/netfile-peer-b
+      GATEWAY: 10.10.2.1
+    networks:
+      lan_b:
+        ipv4_address: 10.10.2.10
+
+  peer_a:
+    image: netfile-dual-nat-runtime:latest
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - signal
+      - nat_a
+      - peer_b
+    entrypoint: ["/usr/local/bin/peer-entrypoint.sh"]
+    environment:
+      ROLE: initiator
+      SIGNAL_ADDR: 172.20.0.2:37200
+      DEVICE_ID: peer-a
+      TARGET_DEVICE_ID: peer-b
+      TRANSFER_PORT: 37050
+      TRANSFER_ADDR: 172.20.0.10:37050
+      NAT_TYPE: cone
+      PAYLOAD_NAME: dual_nat_payload.txt
+      PAYLOAD_CONTENT: hello-from-peer-a-through-double-nat
+      WAIT_TIMEOUT_SECS: 120
+      START_DELAY_SECS: 6
+      DATA_ROOT: /tmp/netfile-peer-a
+      GATEWAY: 10.10.1.1
+    networks:
+      lan_a:
+        ipv4_address: 10.10.1.10
+
+networks:
+  wan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.254
+
+  lan_a:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.1.0/24
+          gateway: 10.10.1.254
+
+  lan_b:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.2.0/24
+          gateway: 10.10.2.254

@@ -84,10 +84,60 @@ netfile/
 2. 设备 B 发送 `AcceptInvite{code}`，服务端建立双向好友关系
 3. 双方收到 `InviteResult`，如果对方在线同时收到 `FriendOnline`
 
-**NAT 打洞协调：**
-1. 设备 A 发送 `RequestPunch{target_device_id}`
-2. 服务端向 A 返回 `PunchCoordinate{peer_addr}`，向 B 发送 `PunchRequest{initiator_addr}`
-3. 双方各自向对端发起 TCP 连接建立直连
+**NAT 打洞协调（当前代码实现）：**
+1. 设备 A 发送 `RequestPunch{target_device_id, nat_type}`
+2. 服务端向 A 返回 `PunchCoordinate{peer_addr, peer_nat_type}`，向 B 发送 `PunchRequest{initiator_addr, initiator_nat_type}`，并创建 punch session
+3. A 收到 `PunchCoordinate` 后立即回 `PunchReady`；B 收到 `PunchRequest` 后会触发本地 `punch_handler`，同时回 `PunchReady`
+4. 服务端等待双方 `PunchReady`，全部就绪后向两边同时发送 `PunchStart{peer_addr, peer_nat_type}`
+5. 客户端收到 `PunchRequest` / `PunchStart` 后，都会调用 `TransferService::punch_hole(peer_addr)`；这里的实际动作是对同一 `transfer_port` 发起 QUIC 连接预热
+6. QUIC 连接建立后写入连接缓存，后续文件/消息传输直接复用；失败时再回退 TURN relay
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as GUI UI
+    participant A as GUI Backend A
+    participant TS_A as TransferService A
+    participant SC_A as SignalClient A
+    participant SS as Signal Server
+    participant SC_B as SignalClient B
+    participant TS_B as TransferService B
+
+    Note over TS_A,TS_B: 启动阶段：各自对 transfer_port 做 STUN，拿到 public transfer_addr 和 nat_type，并注册到 signal
+
+    UI->>A: send_file(targetAddr, peerDeviceId, peerDiscoveryAddr)
+
+    opt 有 discovery 地址
+        A->>A: 发送 discovery PUNCH_REQUEST
+    end
+
+    A->>TS_A: 先尝试局域网直连
+    alt LAN 直连成功
+        TS_A->>TS_B: 直接走 QUIC 传输
+    else LAN 失败 且本端 NAT 可打洞
+        A->>SC_A: request_punch(peerDeviceId)
+        SC_A->>SS: RequestPunch(target=B, nat_type=A)
+        SS-->>SC_A: PunchCoordinate(peer_addr=B)
+        SS-->>SC_B: PunchRequest(initiator_addr=A)
+        SC_A->>SS: PunchReady(target=B)
+        SC_B->>TS_B: punch_handler -> punch_hole(A)
+        SC_B->>SS: PunchReady(target=A)
+        A->>TS_A: 本地立即 punch_hole(B)
+        SS-->>SC_A: PunchStart(peer_addr=B)
+        SS-->>SC_B: PunchStart(peer_addr=A)
+        SC_A->>TS_A: punch_handler -> 再 punch_hole(B)
+        SC_B->>TS_B: punch_handler -> 再 punch_hole(A)
+        TS_A->>TS_B: QUIC connect 预热/建链
+        TS_A->>TS_B: 复用 QUIC 连接 open_bi() 传文件
+    else 本端 NAT 不可打洞
+        A->>SC_A: 直接请求 relay
+    end
+```
+
+说明：
+- GUI 主流程里的“打洞”不是直接使用 `hole_punch.rs` 的 `UdpHolePuncher`，而是 `TransferService::punch_hole()` 里的 QUIC connect 预热。
+- `hole_punch.rs` 目前更接近独立实验/示例能力，主流程的 P2P 建链依赖 `signal_client + transfer::service`。
+- `peer_nat_type` / `initiator_nat_type` 已通过协议传输，但当前客户端是否进入打洞分支主要看“本端 NAT 是否 punchable”。
 
 **消息中继：**
 - 目标在线时：服务端实时转发 `RelayedMessage`
@@ -106,6 +156,7 @@ netfile/
 - 维护到信令服务器的单一 TCP 长连接，reader/writer 独立 task
 - 通过 oneshot channel 实现 `generate_invite` / `accept_invite` / `request_punch` / `request_relay` 的 async 等待
 - reader loop 直接更新 `friends: Arc<RwLock<Vec<FriendInfo>>>`
+- `set_punch_handler(...)` 用于接收 `PunchRequest` / `PunchStart` 后触发本地 QUIC 打洞
 - 收到 `RelayedMessage` / `OfflineMessages` 时写入 `MessageStore`
 - `request_relay(target_device_id)` → 建立与 relay 端口的 TCP 连接，在本地起临时 listener，返回 `127.0.0.1:随机端口`，TransferService 对此地址无感知
 - 收到 `IncomingRelay` 时自动连接 relay 端口并与本地 `local_transfer_port` 建立管道
@@ -116,22 +167,25 @@ netfile/
 
 ```json
 // C2S
-{"type":"register","device_id":"...","instance_name":"...","transfer_addr":"1.2.3.4:37050"}
+{"type":"register","device_id":"...","instance_name":"...","transfer_addr":"1.2.3.4:37050","nat_type":"cone"}
 {"type":"generate_invite"}
 {"type":"accept_invite","code":"ABCD1234"}
-{"type":"request_punch","target_device_id":"..."}
+{"type":"request_punch","target_device_id":"...","nat_type":"cone"}
+{"type":"punch_ready","target_device_id":"..."}
 {"type":"relay_message","to_device_id":"...","content":"...","timestamp":1234567890}
 {"type":"request_relay","target_device_id":"...","session_id":"uuid"}
+{"type":"update_transfer_addr","transfer_addr":"1.2.3.4:37050"}
 {"type":"heartbeat"}
 
 // S2C
-{"type":"registered","friends":[...]}
+{"type":"registered","friends":[...],"observed_addr":"1.2.3.4"}
 {"type":"invite_code","code":"ABCD1234"}
 {"type":"invite_result","success":true,"friend":{...},"error":null}
 {"type":"friend_online","device_id":"...","instance_name":"...","transfer_addr":"..."}
 {"type":"friend_offline","device_id":"..."}
-{"type":"punch_coordinate","peer_addr":"...","peer_device_id":"..."}
-{"type":"punch_request","initiator_device_id":"...","initiator_addr":"..."}
+{"type":"punch_coordinate","peer_addr":"...","peer_device_id":"...","peer_nat_type":"cone"}
+{"type":"punch_request","initiator_device_id":"...","initiator_addr":"...","initiator_nat_type":"cone"}
+{"type":"punch_start","peer_addr":"...","peer_device_id":"...","peer_nat_type":"cone"}
 {"type":"relayed_message","from_device_id":"...","from_instance_name":"...","content":"...","timestamp":...}
 {"type":"offline_messages","messages":[...]}
 {"type":"relay_session","session_id":"uuid","relay_port":37201}
@@ -220,18 +274,23 @@ signal_server_addr = "your-server-ip:37200"
 ### 跨 NAT 通信流程
 
 **文字消息：**
-- 优先尝试直连 TCP（使用 STUN 检测到的公网 transfer_addr）
+- 优先尝试直连到当前目标 `transfer_addr`
 - 直连失败时自动回退到信令服务器中继
 
 **文件传输（三层回退）：**
 
 ```
-直连 IP:port（局域网）
-  └─ 失败 → 对端公网 transfer_addr（STUN 检测，P2P）
-              └─ 失败 → 信令服务器 TURN 中继（需服务端开启 --relay-port）
+局域网直连（Discovery / 手动 IP:port）
+  └─ 失败 → Signal 协调打洞 + QUIC P2P 到对端公网 transfer_addr
+              └─ 失败或本端 NAT 不可打洞 → 信令服务器 TURN 中继（需服务端开启 --relay-port）
 ```
 
 每层失败后自动尝试下一层，全部失败才向用户报错。
+
+**GUI 侧当前判定逻辑：**
+- 先尝试局域网地址。
+- 仅当本端 NAT 为 `no_nat` 或 `cone` 时，才会进入 `request_punch()` 分支。
+- 如果本端 NAT 为 `symmetric`，或打洞后的 QUIC 连接仍失败，则转入 `request_relay()`。
 
 ### FriendInfo 数据结构
 

@@ -17,7 +17,14 @@ interface ChatMessage {
   from_instance_name: string
   content: string
   timestamp: number
+  local_seq: number
   is_self: boolean
+}
+
+interface ConversationDelta {
+  messages: ChatMessage[]
+  next_cursor: number
+  reset: boolean
 }
 
 interface Props {
@@ -32,30 +39,60 @@ const EMOJIS = [
   '🤫','🫠','💔','😢','😔','🥲','🤷','🫣','😼','🐶',
 ]
 
+const normalizeTimestamp = (timestamp: number): number =>
+  timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp
+
+const sortMessages = (messages: ChatMessage[]): ChatMessage[] =>
+  [...messages].sort((a, b) => {
+    const seqDiff = (a.local_seq ?? 0) - (b.local_seq ?? 0)
+    if (seqDiff !== 0) return seqDiff
+
+    const tsDiff = normalizeTimestamp(a.timestamp) - normalizeTimestamp(b.timestamp)
+    if (tsDiff !== 0) return tsDiff
+
+    return a.id.localeCompare(b.id)
+  })
+
 function Chat({ device }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [showEmojis, setShowEmojis] = useState(false)
-  const lastJsonRef = useRef<string>('')
+  const cursorRef = useRef(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    const load = async () => {
+    let cancelled = false
+
+    const applyDelta = (delta: ConversationDelta, replace: boolean) => {
+      cursorRef.current = delta.next_cursor
+      setMessages(prev => {
+        if (replace || delta.reset) return sortMessages(delta.messages)
+        if (delta.messages.length === 0) return prev
+        return sortMessages([...prev, ...delta.messages])
+      })
+    }
+
+    const load = async (replace = false) => {
       try {
-        const msgs = await invoke<ChatMessage[]>('get_conversation', { peerInstanceId: device.device_id })
-        const json = JSON.stringify(msgs)
-        if (json !== lastJsonRef.current) {
-          lastJsonRef.current = json
-          setMessages(msgs)
-        }
+        const delta = await invoke<ConversationDelta>('get_conversation_delta', {
+          peerInstanceId: device.device_id,
+          cursor: replace ? 0 : cursorRef.current,
+        })
+        if (!cancelled) applyDelta(delta, replace)
       } catch (error) {
         console.error('Failed to load conversation:', error)
       }
     }
-    load()
+
+    cursorRef.current = 0
+    setMessages([])
+    load(true)
     const interval = setInterval(load, 1000)
-    return () => clearInterval(interval)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [device.device_id])
 
   useEffect(() => {
@@ -63,7 +100,7 @@ function Chat({ device }: Props) {
   }, [messages])
 
   const formatTime = (timestamp: number): string => {
-    const date = new Date(timestamp * 1000)
+    const date = new Date(normalizeTimestamp(timestamp))
     const h = date.getHours().toString().padStart(2, '0')
     const m = date.getMinutes().toString().padStart(2, '0')
     return `${h}:${m}`
@@ -81,10 +118,16 @@ function Chat({ device }: Props) {
         targetAddr,
         content,
       })
-      const msgs = await invoke<ChatMessage[]>('get_conversation', { peerInstanceId: device.device_id })
-      const json = JSON.stringify(msgs)
-      lastJsonRef.current = json
-      setMessages(msgs)
+      const delta = await invoke<ConversationDelta>('get_conversation_delta', {
+        peerInstanceId: device.device_id,
+        cursor: cursorRef.current,
+      })
+      cursorRef.current = delta.next_cursor
+      setMessages(prev => {
+        if (delta.reset) return sortMessages(delta.messages)
+        if (delta.messages.length === 0) return prev
+        return sortMessages([...prev, ...delta.messages])
+      })
     } catch (error) {
       console.error('Failed to send message:', error)
     }

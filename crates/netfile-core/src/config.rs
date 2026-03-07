@@ -115,7 +115,7 @@ fn default_broadcast_interval() -> u64 {
 }
 
 fn default_chunk_size() -> u32 {
-    1048576
+    4 * 1024 * 1024
 }
 
 fn default_max_concurrent() -> usize {

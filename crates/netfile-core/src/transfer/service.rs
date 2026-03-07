@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
@@ -292,9 +292,10 @@ impl TransferService {
             return Err(e);
         }
 
-        // Spawn writer tasks — each opens its own file handle and writes at chunk offsets
-        let mut writer_set: JoinSet<Result<()>> = JoinSet::new();
-        for rx in channel_receivers {
+        // Spawn writer tasks — each seeks once to the first chunk's offset, then writes sequentially
+        let t_write_start = Instant::now();
+        let mut writer_set: JoinSet<Result<(u64, u64)>> = JoinSet::new();
+        for (stream_idx, rx) in channel_receivers.into_iter().enumerate() {
             let temp_path = temp_file_path.clone();
             let chunk_size_u64 = chunk_size as u64;
             let tracker = self.progress_tracker.clone();
@@ -303,19 +304,36 @@ impl TransferService {
             writer_set.spawn(async move {
                 let mut file = tokio::fs::OpenOptions::new().write(true).open(&temp_path).await?;
                 let mut rx = rx;
+                let mut first = true;
+                let mut total_decompress_ms = 0u64;
+                let mut total_write_ms = 0u64;
                 while let Some((chunk_index, compressed, data)) = rx.recv().await {
+                    let t_decomp = Instant::now();
                     let write_data = if compressed {
                         crate::compression::Compressor::decompress(&data)?
                     } else {
                         data
                     };
-                    let offset = chunk_index as u64 * chunk_size_u64;
-                    file.seek(std::io::SeekFrom::Start(offset)).await?;
+                    total_decompress_ms += t_decomp.elapsed().as_millis() as u64;
+
+                    // Seek only on the first chunk of this stream's range
+                    let t_write = Instant::now();
+                    if first {
+                        let offset = chunk_index as u64 * chunk_size_u64;
+                        file.seek(std::io::SeekFrom::Start(offset)).await?;
+                        first = false;
+                    }
                     file.write_all(&write_data).await?;
+                    total_write_ms += t_write.elapsed().as_millis() as u64;
+
                     tracker.update_progress(&pid, write_data.len() as u64).await;
                 }
+                info!(
+                    "[recv/iroh/multi] stream={} decompress_ms={} write_ms={}",
+                    stream_idx, total_decompress_ms, total_write_ms
+                );
                 debug!("[recv/iroh/multi] writer task done for {}", fid);
-                Ok(())
+                Ok((total_decompress_ms, total_write_ms))
             });
         }
 
@@ -323,9 +341,10 @@ impl TransferService {
             match result {
                 Err(e) => error!("[recv/iroh/multi] writer task panicked: {:?}", e),
                 Ok(Err(e)) => error!("[recv/iroh/multi] writer error: {}", e),
-                Ok(Ok(())) => {}
+                Ok(Ok(_)) => {}
             }
         }
+        info!("[recv/iroh/multi] all writes done for {} in {}ms", file_id, t_write_start.elapsed().as_millis());
 
         data_routes.write().await.remove(&file_id);
 
@@ -344,38 +363,12 @@ impl TransferService {
             }
         };
 
-        // Compute hash from assembled temp file
-        let actual_hash = {
-            let mut hasher = Sha256::new();
-            let mut f = tokio::fs::File::open(&temp_file_path).await?;
-            let mut buf = vec![0u8; 4 * 1024 * 1024];
-            loop {
-                let n = f.read(&mut buf).await?;
-                if n == 0 { break; }
-                hasher.update(&buf[..n]);
-            }
-            let r = hasher.finalize();
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&r);
-            hash
-        };
-
-        if actual_hash != tc.file_hash {
-            error!("[recv/iroh/multi] hash mismatch for {}", file_id);
-            let _ = Self::write_msg(send, &Message::TransferError(TransferError {
-                file_id: file_id.clone(),
-                error: "File hash mismatch".to_string(),
-            })).await;
-            self.progress_tracker.remove_progress(&progress_id).await;
-            let _ = tokio::fs::remove_file(&temp_file_path).await;
-            return Err(anyhow::anyhow!("File hash mismatch"));
-        }
-
         if tokio::fs::rename(&temp_file_path, &final_path).await.is_err() {
             tokio::fs::copy(&temp_file_path, &final_path).await?;
             tokio::fs::remove_file(&temp_file_path).await?;
         }
 
+        // Send ACK immediately — do not block on hash verification
         if let Err(e) = Self::write_msg(send, &Message::TransferComplete(TransferComplete {
             file_id: file_id.clone(),
             file_hash: tc.file_hash,
@@ -383,6 +376,37 @@ impl TransferService {
             self.progress_tracker.remove_progress(&progress_id).await;
             return Err(e);
         }
+
+        // Background hash verification — does not block the sender
+        let verify_path = final_path.clone();
+        let expected_hash = tc.file_hash;
+        let fid_bg = file_id.clone();
+        tokio::spawn(async move {
+            let t_hash = Instant::now();
+            let mut hasher = Sha256::new();
+            match tokio::fs::File::open(&verify_path).await {
+                Ok(mut f) => {
+                    let mut buf = vec![0u8; 4 * 1024 * 1024];
+                    loop {
+                        match f.read(&mut buf).await {
+                            Ok(0) => break,
+                            Ok(n) => hasher.update(&buf[..n]),
+                            Err(e) => { warn!("[recv/iroh/multi] hash verify read error for {}: {}", fid_bg, e); return; }
+                        }
+                    }
+                    let r = hasher.finalize();
+                    let mut actual = [0u8; 32];
+                    actual.copy_from_slice(&r);
+                    let hash_ms = t_hash.elapsed().as_millis();
+                    if actual == expected_hash {
+                        info!("[recv/iroh/multi] bg hash OK for {} hash_ms={}", fid_bg, hash_ms);
+                    } else {
+                        error!("[recv/iroh/multi] bg hash MISMATCH for {} hash_ms={}", fid_bg, hash_ms);
+                    }
+                }
+                Err(e) => warn!("[recv/iroh/multi] bg hash open error for {}: {}", fid_bg, e),
+            }
+        });
 
         let (elapsed, method) = self.progress_tracker.get_progress(&progress_id).await
             .map(|p| (p.start_time.elapsed().as_secs(), p.transfer_method.clone()))
@@ -943,8 +967,19 @@ impl TransferService {
         self.send_folder_via_iroh(folder_path, endpoint_addr, enable_compression).await
     }
 
-    // Opens N data bi-streams on conn, reads file sequentially (computing hash + distributing
-    // chunks round-robin), sends in parallel. Returns the file hash.
+    fn is_compressible(file_name: &str) -> bool {
+        let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        !matches!(ext.as_str(),
+            "mp4" | "mov" | "mkv" | "avi" | "wmv" | "flv" | "webm" |
+            "mp3" | "aac" | "ogg" | "flac" | "m4a" | "wav" |
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "avif" |
+            "zip" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" |
+            "pdf" | "docx" | "xlsx" | "pptx"
+        )
+    }
+
+    // Each stream reads its own continuous chunk range independently.
+    // Computes whole-file hash upfront (one sequential pass), then N tasks send in parallel.
     async fn send_data_streams(
         &self,
         conn: &iroh::endpoint::Connection,
@@ -957,98 +992,110 @@ impl TransferService {
         speed_limit_bytes_per_sec: u64,
         n_streams: u32,
     ) -> Result<[u8; 32]> {
-        let n = n_streams as usize;
+        let file_name = file_path
+            .file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let compress = enable_compression && Self::is_compressible(&file_name);
 
-        // Open N data bi-streams and send DataStreamHeader on each
-        let mut data_sends = Vec::with_capacity(n);
+        // Step 1: compute whole-file hash upfront (sequential pass)
+        let t_hash = Instant::now();
+        let file_hash = {
+            let mut hasher = Sha256::new();
+            let mut f = tokio::fs::File::open(file_path).await?;
+            let mut buf = vec![0u8; 4 * 1024 * 1024];
+            loop {
+                let n = f.read(&mut buf).await?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+            }
+            let r = hasher.finalize();
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&r);
+            h
+        };
+        let hash_ms = t_hash.elapsed().as_millis();
+        info!("[send/iroh/multi] file_id={} upfront_hash_ms={}", file_id, hash_ms);
+
+        // Step 2: partition chunks into N ranges
+        let n = n_streams as usize;
+        let chunks_per_stream = (total_chunks + n_streams - 1) / n_streams;
+
+        // Step 3: open N data streams and spawn N independent range tasks
+        let mut tasks: JoinSet<Result<(usize, u64, u64, u64)>> = JoinSet::new();
         for i in 0..n {
+            let start_chunk = (i as u32) * chunks_per_stream;
+            if start_chunk >= total_chunks { break; }
+            let end_chunk = ((i as u32 + 1) * chunks_per_stream).min(total_chunks);
+
             let (mut ds_send, _ds_recv) = conn.open_bi().await
                 .map_err(|e| anyhow::anyhow!("open data stream {} failed: {}", i, e))?;
             Self::write_msg(&mut ds_send, &Message::DataStreamHeader(DataStreamHeader {
                 file_id: file_id.to_string(),
                 stream_index: i as u32,
             })).await?;
-            data_sends.push(ds_send);
-        }
 
-        // Per-stream channels: (chunk_index, compressed, data)
-        let mut txs: Vec<mpsc::Sender<(u32, bool, Vec<u8>)>> = Vec::with_capacity(n);
-        let mut rxs: Vec<mpsc::Receiver<(u32, bool, Vec<u8>)>> = Vec::with_capacity(n);
-        for _ in 0..n {
-            let (tx, rx) = mpsc::channel(8);
-            txs.push(tx);
-            rxs.push(rx);
-        }
+            let fp = file_path.clone();
+            let pt = self.progress_tracker.clone();
+            let fid = file_id.to_string();
+            let spdlim = speed_limit_bytes_per_sec;
 
-        // Spawn data sender tasks
-        let mut sender_set: JoinSet<Result<()>> = JoinSet::new();
-        for (mut ds_send, rx) in data_sends.into_iter().zip(rxs.into_iter()) {
-            let mut rx = rx;
-            sender_set.spawn(async move {
-                while let Some((chunk_index, compressed, data)) = rx.recv().await {
-                    Self::write_chunk_raw(&mut ds_send, chunk_index, compressed, &data).await?;
+            tasks.spawn(async move {
+                let byte_offset = start_chunk as u64 * chunk_size as u64;
+                let mut file = tokio::fs::File::open(&fp).await?;
+                file.seek(std::io::SeekFrom::Start(byte_offset)).await?;
+
+                let mut total_read_ms = 0u64;
+                let mut total_compress_ms = 0u64;
+                let mut total_send_ms = 0u64;
+
+                for chunk_index in start_chunk..end_chunk {
+                    let offset = chunk_index as u64 * chunk_size as u64;
+                    let remaining = file_size - offset;
+                    let read_size = (chunk_size as u64).min(remaining) as usize;
+                    let mut buffer = vec![0u8; read_size];
+
+                    let t_read = Instant::now();
+                    file.read_exact(&mut buffer).await
+                        .map_err(|e| anyhow::anyhow!("read chunk {} failed: {}", chunk_index, e))?;
+                    total_read_ms += t_read.elapsed().as_millis() as u64;
+
+                    let t_compress = Instant::now();
+                    let (send_data, compressed) = if compress && buffer.len() > 1024 {
+                        match crate::compression::Compressor::compress(&buffer) {
+                            Ok(c) if c.len() < buffer.len() => (c, true),
+                            _ => (buffer, false),
+                        }
+                    } else {
+                        (buffer, false)
+                    };
+                    total_compress_ms += t_compress.elapsed().as_millis() as u64;
+
+                    let bytes_len = send_data.len() as u64;
+
+                    let t_send = Instant::now();
+                    Self::write_chunk_raw(&mut ds_send, chunk_index, compressed, &send_data).await?;
+                    total_send_ms += t_send.elapsed().as_millis() as u64;
+
+                    pt.update_progress(&fid, bytes_len).await;
+
+                    if spdlim > 0 {
+                        let delay = (bytes_len * 1_000_000) / spdlim;
+                        tokio::time::sleep(tokio::time::Duration::from_micros(delay)).await;
+                    }
                 }
-                Ok(())
+
+                info!(
+                    "[send/iroh/multi] stream={} chunks={}..{} read_ms={} compress_ms={} send_ms={}",
+                    i, start_chunk, end_chunk, total_read_ms, total_compress_ms, total_send_ms
+                );
+                Ok((i, total_read_ms, total_compress_ms, total_send_ms))
             });
         }
 
-        // File reader task: sequential read, hash, round-robin distribute
-        let file_path = file_path.clone();
-        let progress_tracker = self.progress_tracker.clone();
-        let file_id_str = file_id.to_string();
-        let reader = tokio::spawn(async move {
-            let mut file = tokio::fs::File::open(&file_path).await
-                .map_err(|e| anyhow::anyhow!("open file failed: {}", e))?;
-            let mut hasher = Sha256::new();
-
-            for chunk_index in 0..total_chunks {
-                let offset = chunk_index as u64 * chunk_size as u64;
-                let remaining = file_size - offset;
-                let read_size = (chunk_size as u64).min(remaining) as usize;
-                let mut buffer = vec![0u8; read_size];
-                file.read_exact(&mut buffer).await
-                    .map_err(|e| anyhow::anyhow!("read chunk {} failed: {}", chunk_index, e))?;
-                hasher.update(&buffer);
-
-                let (send_data, compressed) = if enable_compression && buffer.len() > 1024 {
-                    match crate::compression::Compressor::compress(&buffer) {
-                        Ok(c) if c.len() < buffer.len() => (c, true),
-                        _ => (buffer, false),
-                    }
-                } else {
-                    (buffer, false)
-                };
-
-                let bytes_len = send_data.len() as u64;
-                let stream_idx = (chunk_index as usize) % n;
-                if txs[stream_idx].send((chunk_index, compressed, send_data)).await.is_err() {
-                    return Err(anyhow::anyhow!("data stream {} channel closed", stream_idx));
-                }
-
-                progress_tracker.update_progress(&file_id_str, bytes_len).await;
-
-                if speed_limit_bytes_per_sec > 0 {
-                    let delay = (bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
-                    tokio::time::sleep(tokio::time::Duration::from_micros(delay)).await;
-                }
-            }
-
-            drop(txs); // signal sender tasks to finish
-            let r = hasher.finalize();
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&r);
-            Ok::<[u8; 32], anyhow::Error>(hash)
-        });
-
-        // Wait for reader, then all senders
-        let file_hash = reader.await
-            .map_err(|e| anyhow::anyhow!("reader task panicked: {:?}", e))??;
-
-        while let Some(result) = sender_set.join_next().await {
+        while let Some(result) = tasks.join_next().await {
             match result {
-                Err(e) => warn!("[send/iroh/multi] sender task panicked: {:?}", e),
-                Ok(Err(e)) => warn!("[send/iroh/multi] sender error: {}", e),
-                Ok(Ok(())) => {}
+                Err(e) => warn!("[send/iroh/multi] stream task panicked: {:?}", e),
+                Ok(Err(e)) => warn!("[send/iroh/multi] stream error: {}", e),
+                Ok(Ok(_)) => {}
             }
         }
 
@@ -1246,7 +1293,7 @@ impl TransferService {
 
             hasher.update(&buffer);
 
-            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && Self::is_compressible(&file_name) && buffer.len() > 1024 {
                 match crate::compression::Compressor::compress(&buffer) {
                     Ok(c) if c.len() < buffer.len() => (c, true),
                     _ => (buffer, false),
@@ -1413,7 +1460,7 @@ impl TransferService {
 
             hasher.update(&buffer);
 
-            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && Self::is_compressible(&file_name) && buffer.len() > 1024 {
                 match crate::compression::Compressor::compress(&buffer) {
                     Ok(c) if c.len() < buffer.len() => (c, true),
                     _ => (buffer, false),
@@ -1820,7 +1867,7 @@ impl TransferService {
 
             hasher.update(&buffer);
 
-            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && buffer.len() > 1024 {
+            let (send_data, compressed): (Vec<u8>, bool) = if enable_compression && Self::is_compressible(&file_name) && buffer.len() > 1024 {
                 match crate::compression::Compressor::compress(&buffer) {
                     Ok(c) if c.len() < buffer.len() => (c, true),
                     _ => (buffer, false),

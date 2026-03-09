@@ -24,6 +24,7 @@ interface Config {
     speed_limit_mbps: number
     require_confirmation: boolean
     quic_stream_window_mb: number
+    history_page_size: number
   }
   security: {
     require_auth: boolean
@@ -331,6 +332,28 @@ function Settings({ onClose }: Props) {
                     transfer: {
                       ...config.transfer,
                       quic_stream_window_mb: parseInt(e.target.value),
+                    },
+                  })
+                }
+              />
+            </div>
+            <div className="form-group">
+              <div className="slider-label-row">
+                <label>每页记录数</label>
+                <span className="slider-value">{config.transfer.history_page_size ?? 20}</span>
+              </div>
+              <input
+                type="range"
+                min={5}
+                max={200}
+                step={5}
+                value={config.transfer.history_page_size ?? 20}
+                onChange={(e) =>
+                  setConfig({
+                    ...config,
+                    transfer: {
+                      ...config.transfer,
+                      history_page_size: parseInt(e.target.value),
                     },
                   })
                 }

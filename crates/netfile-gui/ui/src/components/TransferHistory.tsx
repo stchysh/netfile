@@ -24,6 +24,9 @@ function methodLabel(method?: string): string {
 function TransferHistory() {
   const [records, setRecords] = useState<TransferRecord[]>([])
   const lastJsonRef = useRef<string>('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [pageSize, setPageSize] = useState(20)
+  const [currentPage, setCurrentPage] = useState(0)
 
   useEffect(() => {
     const load = async () => {
@@ -38,10 +41,23 @@ function TransferHistory() {
         console.error('Failed to load transfer history:', error)
       }
     }
+    const loadConfig = async () => {
+      try {
+        const config = await invoke<any>('get_config')
+        setPageSize(config?.transfer?.history_page_size ?? 20)
+      } catch (error) {
+        console.error('Failed to load config:', error)
+      }
+    }
     load()
+    loadConfig()
     const interval = setInterval(load, 3000)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    setCurrentPage(0)
+  }, [searchQuery])
 
   const handleOpenFile = async (path: string) => {
     try {
@@ -99,10 +115,22 @@ function TransferHistory() {
     return `${mo}-${d} ${h}:${m}`
   }
 
+  const filteredRecords = records.filter(r =>
+    r.file_name.toLowerCase().includes(searchQuery.toLowerCase())
+  )
+  const totalPages = Math.ceil(filteredRecords.length / pageSize)
+  const pagedRecords = filteredRecords.slice(currentPage * pageSize, (currentPage + 1) * pageSize)
+
   return (
     <div className="transfer-history">
       <div className="transfer-history-header">
         <h2>传输记录</h2>
+        <input
+          className="history-search-input"
+          placeholder="搜索文件名"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
         {records.length > 0 && (
           <button className="history-clear-button" onClick={handleClear}>
             清空
@@ -110,12 +138,13 @@ function TransferHistory() {
         )}
       </div>
       <div className="transfer-history-content">
-        {records.length === 0 ? (
+        {filteredRecords.length === 0 ? (
           <div className="empty-state">
             <p>暂无传输记录</p>
           </div>
         ) : (
-          records.map((record) => (
+          <>
+          {pagedRecords.map((record) => (
             <div
               key={record.id}
               className={`history-item ${record.status === 'failed' ? 'history-item-error' : ''}`}
@@ -159,7 +188,27 @@ function TransferHistory() {
                 </span>
               </div>
             </div>
-          ))
+          ))}
+          {totalPages > 1 && (
+            <div className="history-pagination">
+              <button
+                className="history-page-btn"
+                disabled={currentPage === 0}
+                onClick={() => setCurrentPage(p => p - 1)}
+              >
+                上一页
+              </button>
+              <span>第 {currentPage + 1} 页 / 共 {totalPages} 页</span>
+              <button
+                className="history-page-btn"
+                disabled={currentPage >= totalPages - 1}
+                onClick={() => setCurrentPage(p => p + 1)}
+              >
+                下一页
+              </button>
+            </div>
+          )}
+          </>
         )}
       </div>
     </div>

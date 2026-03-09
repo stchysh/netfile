@@ -50,6 +50,8 @@ pub struct TransferConfig {
     pub iroh_stream_count: u32,
     #[serde(default = "default_quic_stream_window_mb")]
     pub quic_stream_window_mb: u32,
+    #[serde(default = "default_history_page_size")]
+    pub history_page_size: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +134,10 @@ fn default_quic_stream_window_mb() -> u32 {
     32
 }
 
+fn default_history_page_size() -> u32 {
+    20
+}
+
 fn default_require_auth() -> bool {
     true
 }
@@ -179,6 +185,7 @@ impl Default for TransferConfig {
             require_confirmation: true,
             iroh_stream_count: default_iroh_stream_count(),
             quic_stream_window_mb: default_quic_stream_window_mb(),
+            history_page_size: default_history_page_size(),
         }
     }
 }

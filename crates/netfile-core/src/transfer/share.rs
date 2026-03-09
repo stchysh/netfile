@@ -165,9 +165,9 @@ impl ShareStore {
         self.write_entries(&entries).await
     }
 
-    /// Set MD5 for an entry. Merges tags from duplicate entries but does NOT
-    /// change excluded state — each record's share status is controlled independently
-    /// by the user. Deduplication for sharing is handled in get_shared_entries.
+    /// Set MD5 for an entry. Merges tags from duplicate entries and inherits
+    /// the excluded state from existing same-MD5 entries so that user-set
+    /// share status is automatically applied to newly received/sent copies.
     pub async fn update_md5(&self, record_id: &str, hash: String) -> Result<()> {
         let _guard = self.lock.lock().await;
         let mut entries = self.read_entries().await;
@@ -183,18 +183,23 @@ impl ShareStore {
             e.record_id != record_id && e.file_md5.as_deref() == Some(hash.as_str())
         });
 
-        if let Some(idx) = dup_idx {
+        let inherited_excluded = if let Some(idx) = dup_idx {
             // Merge current entry's tags into the existing duplicate
             for tag in &current_tags {
                 if !entries[idx].tags.contains(tag) {
                     entries[idx].tags.push(tag.clone());
                 }
             }
-        }
+            Some(entries[idx].excluded)
+        } else {
+            None
+        };
 
-        // Always just set the MD5; excluded state is never changed automatically
         if let Some(e) = entries.iter_mut().find(|e| e.record_id == record_id) {
             e.file_md5 = Some(hash);
+            if let Some(excl) = inherited_excluded {
+                e.excluded = excl;
+            }
         }
 
         self.write_entries(&entries).await
@@ -254,9 +259,6 @@ impl ShareStore {
                 Some(p) => p.clone(),
                 None => continue,
             };
-            if !std::path::Path::new(&save_path).exists() {
-                continue;
-            }
             new_entries.push(ShareEntry {
                 record_id: record.id.clone(),
                 file_name: record.file_name.clone(),

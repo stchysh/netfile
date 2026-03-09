@@ -1,7 +1,8 @@
 use netfile_core::{
-    generate_random_name, BookmarkEntry, BookmarkStore, ChatMessage, Config, ConversationDelta,
-    Device, DiscoveryService, FriendInfo, HistoryStore, IrohManager, MessageStore, ShareEntry,
-    ShareStore, SignalClient, SignalStatus, TransferProgress, TransferRecord, TransferService,
+    compute_file_sha256, generate_random_name, BookmarkEntry, BookmarkStore, ChatMessage, Config,
+    ConversationDelta, Device, DiscoveryService, FriendInfo, HistoryStore, IrohManager,
+    MessageStore, ShareEntry, ShareStore, SignalClient, SignalStatus, TransferProgress,
+    TransferRecord, TransferService,
 };
 use netfile_core::protocol::ShareListResponse;
 use std::collections::HashMap;
@@ -384,6 +385,11 @@ async fn clear_transfer_history(state: State<'_, AppState>) -> Result<(), String
     state
         .history_store
         .clear_history()
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .share_store
+        .clear_all()
         .await
         .map_err(|e| e.to_string())
 }
@@ -904,6 +910,37 @@ pub fn run() {
                             let handle = spawn_iroh_addr_watcher(sc_clone.clone(), iroh_manager_clone);
                             *iroh_watcher_clone.lock().await = Some(handle);
                             *signal_client_clone.write().await = Some(sc_clone);
+                        }
+                    });
+                }
+
+                // Startup share sync: 3 seconds after launch, sync share list with history
+                {
+                    let share_store_bg = share_store.clone();
+                    let history_store_bg = history_store.clone();
+                    let enable_sharing = config.transfer.enable_sharing;
+                    let instance_name = config.instance.instance_name.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        if !enable_sharing {
+                            return;
+                        }
+                        let records = history_store_bg.load_history().await;
+                        let _ = share_store_bg.sync_from_history(&records, &instance_name).await;
+                        // Compute hashes for entries that don't have one yet
+                        let entries = share_store_bg.load_entries().await;
+                        for entry in entries {
+                            if entry.file_md5.is_some() {
+                                continue;
+                            }
+                            let path = std::path::PathBuf::from(&entry.save_path);
+                            let store = share_store_bg.clone();
+                            let rid = entry.record_id.clone();
+                            tokio::spawn(async move {
+                                if let Ok(hash) = compute_file_sha256(&path).await {
+                                    let _ = store.update_md5(&rid, hash).await;
+                                }
+                            });
                         }
                     });
                 }

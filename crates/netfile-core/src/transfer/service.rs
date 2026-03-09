@@ -472,6 +472,18 @@ impl TransferService {
         };
         let _ = self.share_store.upsert_entry(share_entry).await;
 
+        // Background: compute file hash for dedup
+        {
+            let store = self.share_store.clone();
+            let path = final_path.clone();
+            let rid = record_id.clone();
+            tokio::spawn(async move {
+                if let Ok(hash) = super::share::compute_file_sha256(&path).await {
+                    let _ = store.update_md5(&rid, hash).await;
+                }
+            });
+        }
+
         Ok(())
     }
 
@@ -772,6 +784,18 @@ impl TransferService {
             timestamp: ts,
         };
         let _ = self.share_store.upsert_entry(share_entry).await;
+
+        // Background: compute file hash for dedup
+        {
+            let store = self.share_store.clone();
+            let path = final_save_path.clone();
+            let rid = record_id.clone();
+            tokio::spawn(async move {
+                if let Ok(hash) = super::share::compute_file_sha256(&path).await {
+                    let _ = store.update_md5(&rid, hash).await;
+                }
+            });
+        }
 
         Ok(())
     }

@@ -38,13 +38,17 @@ interface BookmarkEntry {
   bookmarked_at: number
 }
 
+const SHARE_VIEW_KEY = 'share_browser_view'
+
 function ShareBrowser() {
   const [devices, setDevices] = useState<DeviceShares[]>([])
   const [loading, setLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
-  const [view, setView] = useState<'all' | 'bookmarks'>('all')
+  const [view, setView] = useState<'all' | 'bookmarks'>(
+    () => (localStorage.getItem(SHARE_VIEW_KEY) as 'all' | 'bookmarks') || 'all'
+  )
   const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>([])
   const lastLoadRef = useRef<number>(0)
   const cacheRef = useRef<DeviceShares[]>([])
@@ -161,13 +165,13 @@ function ShareBrowser() {
           <div className="share-view-tabs">
             <button
               className={`share-view-tab ${view === 'all' ? 'active' : ''}`}
-              onClick={() => setView('all')}
+              onClick={() => { setView('all'); localStorage.setItem(SHARE_VIEW_KEY, 'all') }}
             >
               全部
             </button>
             <button
               className={`share-view-tab ${view === 'bookmarks' ? 'active' : ''}`}
-              onClick={() => setView('bookmarks')}
+              onClick={() => { setView('bookmarks'); localStorage.setItem(SHARE_VIEW_KEY, 'bookmarks') }}
             >
               收藏夹
             </button>

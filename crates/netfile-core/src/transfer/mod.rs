@@ -13,4 +13,4 @@ pub use state::TransferState;
 pub use directory::{FileEntry, scan_directory, calculate_total_size, count_files};
 pub use progress::{TransferProgress, ProgressTracker};
 pub use history::{TransferRecord, HistoryStore};
-pub use share::{ShareEntry, ShareStore, BookmarkEntry, BookmarkStore};
+pub use share::{ShareEntry, ShareStore, BookmarkEntry, BookmarkStore, compute_file_sha256};

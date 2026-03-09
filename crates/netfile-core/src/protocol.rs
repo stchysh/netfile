@@ -14,6 +14,34 @@ pub enum Message {
     TextMessage(TextMessage),
     TextAck(TextAck),
     DataStreamHeader(DataStreamHeader),
+    ShareListRequest(ShareListRequest),
+    ShareListResponse(ShareListResponse),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareListRequest {
+    pub requester_instance_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedFileInfo {
+    pub file_id: String,
+    pub file_name: String,
+    pub file_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_md5: Option<String>,
+    pub tags: Vec<String>,
+    pub remark: String,
+    pub download_count: u32,
+    pub require_confirm: bool,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareListResponse {
+    pub instance_name: String,
+    pub require_confirm: bool,
+    pub entries: Vec<SharedFileInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

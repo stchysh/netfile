@@ -25,6 +25,8 @@ interface Config {
     require_confirmation: boolean
     quic_stream_window_mb: number
     history_page_size: number
+    enable_sharing: boolean
+    sharing_require_confirm: boolean
   }
   security: {
     require_auth: boolean
@@ -441,6 +443,42 @@ function Settings({ onClose }: Props) {
                   }
                 />
                 <span>需要确认接收</span>
+              </label>
+            </div>
+            <div className="form-group checkbox-group">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={config.transfer.enable_sharing ?? true}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      transfer: {
+                        ...config.transfer,
+                        enable_sharing: e.target.checked,
+                      },
+                    })
+                  }
+                />
+                <span>启用文件共享</span>
+              </label>
+            </div>
+            <div className="form-group checkbox-group">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={config.transfer.sharing_require_confirm ?? false}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      transfer: {
+                        ...config.transfer,
+                        sharing_require_confirm: e.target.checked,
+                      },
+                    })
+                  }
+                />
+                <span>共享下载需要确认</span>
               </label>
             </div>
           </div>

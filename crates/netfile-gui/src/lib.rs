@@ -1,8 +1,9 @@
 use netfile_core::{
-    generate_random_name, ChatMessage, Config, ConversationDelta, Device, DiscoveryService,
-    FriendInfo, HistoryStore, IrohManager, MessageStore, SignalClient, SignalStatus,
-    TransferProgress, TransferRecord, TransferService,
+    generate_random_name, BookmarkEntry, BookmarkStore, ChatMessage, Config, ConversationDelta,
+    Device, DiscoveryService, FriendInfo, HistoryStore, IrohManager, MessageStore, ShareEntry,
+    ShareStore, SignalClient, SignalStatus, TransferProgress, TransferRecord, TransferService,
 };
+use netfile_core::protocol::ShareListResponse;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ pub struct AppState {
     pub transfer_service: Arc<TransferService>,
     pub message_store: Arc<MessageStore>,
     pub history_store: Arc<HistoryStore>,
+    pub share_store: Arc<ShareStore>,
+    pub bookmark_store: Arc<BookmarkStore>,
     pub signal_client: Arc<RwLock<Option<Arc<SignalClient>>>>,
     pub iroh_manager: Arc<IrohManager>,
     pub iroh_watcher: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -386,6 +389,103 @@ async fn clear_transfer_history(state: State<'_, AppState>) -> Result<(), String
 }
 
 #[tauri::command]
+async fn get_share_entries(state: State<'_, AppState>) -> Result<Vec<ShareEntry>, String> {
+    Ok(state.share_store.load_entries().await)
+}
+
+#[tauri::command]
+async fn set_share_excluded(
+    state: State<'_, AppState>,
+    record_id: String,
+    excluded: bool,
+) -> Result<(), String> {
+    state.share_store.set_excluded(&record_id, excluded).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_share_tags(
+    state: State<'_, AppState>,
+    record_id: String,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    state.share_store.update_tags(&record_id, tags).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_share_remark(
+    state: State<'_, AppState>,
+    record_id: String,
+    remark: String,
+) -> Result<(), String> {
+    state.share_store.update_remark(&record_id, remark).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn query_device_shares(
+    state: State<'_, AppState>,
+    transfer_addr: String,
+) -> Result<ShareListResponse, String> {
+    state.transfer_service.query_device_shares(&transfer_addr).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn query_all_shares(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let devices = state.discovery_service.get_devices().await;
+    let mut results = Vec::new();
+    for device in devices {
+        if device.is_self {
+            continue;
+        }
+        let addr = format!("{}:{}", device.ip, device.port);
+        match state.transfer_service.query_device_shares(&addr).await {
+            Ok(resp) => {
+                results.push(serde_json::json!({
+                    "instance_id": device.instance_id,
+                    "instance_name": device.instance_name,
+                    "transfer_addr": addr,
+                    "require_confirm": resp.require_confirm,
+                    "files": resp.entries,
+                    "loaded": true,
+                }));
+            }
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "instance_id": device.instance_id,
+                    "instance_name": device.instance_name,
+                    "transfer_addr": addr,
+                    "require_confirm": false,
+                    "files": [],
+                    "loaded": false,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+async fn get_bookmarks(state: State<'_, AppState>) -> Result<Vec<BookmarkEntry>, String> {
+    Ok(state.bookmark_store.get_bookmarks().await)
+}
+
+#[tauri::command]
+async fn add_bookmark(
+    state: State<'_, AppState>,
+    entry: BookmarkEntry,
+) -> Result<(), String> {
+    state.bookmark_store.add_bookmark(entry).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_bookmark(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    state.bookmark_store.remove_bookmark(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
     Ok(state.config.read().await.clone())
 }
@@ -437,6 +537,15 @@ async fn update_config(
     state
         .transfer_service
         .update_max_concurrent(config.transfer.max_concurrent)
+        .await;
+
+    state
+        .transfer_service
+        .update_sharing_config(
+            config.instance.instance_name.clone(),
+            config.transfer.enable_sharing,
+            config.transfer.sharing_require_confirm,
+        )
         .await;
 
     if old_signal_addr != new_signal_addr {
@@ -667,6 +776,15 @@ pub fn run() {
             accept_invite_code,
             get_signal_friends,
             send_relay_message,
+            get_share_entries,
+            set_share_excluded,
+            update_share_tags,
+            update_share_remark,
+            query_device_shares,
+            query_all_shares,
+            get_bookmarks,
+            add_bookmark,
+            remove_bookmark,
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {
@@ -721,9 +839,17 @@ pub fn run() {
                     config.transfer.iroh_stream_count,
                 ).await;
 
+                transfer_service.update_sharing_config(
+                    config.instance.instance_name.clone(),
+                    config.transfer.enable_sharing,
+                    config.transfer.sharing_require_confirm,
+                ).await;
+
                 let iroh_manager = transfer_service.iroh_manager();
                 let message_store = transfer_service.message_store();
                 let history_store = transfer_service.history_store();
+                let share_store = transfer_service.share_store();
+                let bookmark_store = Arc::new(BookmarkStore::new(data_dir.clone()));
                 let transfer_port = transfer_service.local_port();
 
                 let session_instance_id = Uuid::new_v4().to_string();
@@ -788,6 +914,8 @@ pub fn run() {
                     transfer_service,
                     message_store,
                     history_store,
+                    share_store,
+                    bookmark_store,
                     signal_client,
                     iroh_manager,
                     iroh_watcher,

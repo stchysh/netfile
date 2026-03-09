@@ -1,8 +1,9 @@
 use super::file_transfer::FileReceiver;
 use super::history::{HistoryStore, TransferRecord};
+use super::share::{ShareEntry, ShareStore};
 use sha2::{Digest, Sha256};
 use super::progress::ProgressTracker;
-use crate::protocol::{DataStreamHeader, Message, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
+use crate::protocol::{DataStreamHeader, Message, ShareListRequest, ShareListResponse, SharedFileInfo, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
 use crate::message_store::{ChatMessage, MessageStore};
 use crate::iroh_net::IrohManager;
 use anyhow::Result;
@@ -37,6 +38,10 @@ pub struct TransferService {
     iroh_stream_count: Arc<RwLock<u32>>,
     message_store: Arc<MessageStore>,
     history_store: Arc<HistoryStore>,
+    share_store: Arc<ShareStore>,
+    instance_name: Arc<RwLock<String>>,
+    enable_sharing: Arc<RwLock<bool>>,
+    sharing_require_confirm: Arc<RwLock<bool>>,
     semaphore: Arc<RwLock<Arc<Semaphore>>>,
 }
 
@@ -74,6 +79,7 @@ impl TransferService {
 
         let message_store = Arc::new(MessageStore::new(data_dir.clone()));
         let history_store = Arc::new(HistoryStore::new(data_dir.clone()));
+        let share_store = Arc::new(ShareStore::new(data_dir.clone()));
         let semaphore = Arc::new(RwLock::new(Arc::new(Semaphore::new(max_concurrent))));
 
         Ok(Self {
@@ -95,6 +101,10 @@ impl TransferService {
             iroh_stream_count: Arc::new(RwLock::new(4)),
             message_store,
             history_store,
+            share_store,
+            instance_name: Arc::new(RwLock::new(String::new())),
+            enable_sharing: Arc::new(RwLock::new(true)),
+            sharing_require_confirm: Arc::new(RwLock::new(false)),
             semaphore,
         })
     }
@@ -433,8 +443,9 @@ impl TransferService {
 
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let record_id = Uuid::new_v4().to_string();
         let _ = self.history_store.add_record(TransferRecord {
-            id: Uuid::new_v4().to_string(),
+            id: record_id.clone(),
             file_name: request.file_name.clone(),
             file_size,
             direction: "receive".to_string(),
@@ -445,6 +456,21 @@ impl TransferService {
             save_path: Some(final_path.to_string_lossy().to_string()),
             transfer_method: method,
         }).await;
+
+        let instance_name = self.instance_name.read().await.clone();
+        let share_entry = ShareEntry {
+            record_id: record_id.clone(),
+            file_name: request.file_name.clone(),
+            file_size,
+            save_path: final_path.to_string_lossy().to_string(),
+            file_md5: None,
+            tags: vec![instance_name],
+            remark: String::new(),
+            excluded: false,
+            download_count: 0,
+            timestamp: ts,
+        };
+        let _ = self.share_store.upsert_entry(share_entry).await;
 
         Ok(())
     }
@@ -487,6 +513,9 @@ impl TransferService {
             }
             Message::TextMessage(msg) => {
                 self.handle_text_message(send, msg).await?;
+            }
+            Message::ShareListRequest(_req) => {
+                self.handle_share_list_request(send).await?;
             }
             #[allow(unreachable_patterns)]
             _ => {
@@ -714,8 +743,10 @@ impl TransferService {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let final_save_path = download_dir.join(request.relative_path.as_deref().unwrap_or(&request.file_name));
+        let record_id = Uuid::new_v4().to_string();
         let _ = self.history_store.add_record(TransferRecord {
-            id: Uuid::new_v4().to_string(),
+            id: record_id.clone(),
             file_name: request.file_name.clone(),
             file_size: request.file_size,
             direction: "receive".to_string(),
@@ -723,10 +754,53 @@ impl TransferService {
             error: None,
             timestamp: ts,
             elapsed_secs: elapsed,
-            save_path: Some(download_dir.join(request.relative_path.as_deref().unwrap_or(&request.file_name)).to_string_lossy().to_string()),
+            save_path: Some(final_save_path.to_string_lossy().to_string()),
             transfer_method: method,
         }).await;
 
+        let instance_name = self.instance_name.read().await.clone();
+        let share_entry = ShareEntry {
+            record_id: record_id.clone(),
+            file_name: request.file_name.clone(),
+            file_size: request.file_size,
+            save_path: final_save_path.to_string_lossy().to_string(),
+            file_md5: None,
+            tags: vec![instance_name],
+            remark: String::new(),
+            excluded: false,
+            download_count: 0,
+            timestamp: ts,
+        };
+        let _ = self.share_store.upsert_entry(share_entry).await;
+
+        Ok(())
+    }
+
+    async fn handle_share_list_request<W: AsyncWrite + Unpin>(&self, send: &mut W) -> Result<()> {
+        let enable_sharing = *self.enable_sharing.read().await;
+        let entries = if enable_sharing {
+            self.share_store.get_shared_entries().await
+        } else {
+            Vec::new()
+        };
+        let require_confirm = *self.sharing_require_confirm.read().await;
+        let instance_name = self.instance_name.read().await.clone();
+        let shared_files: Vec<SharedFileInfo> = entries.into_iter().map(|e| SharedFileInfo {
+            file_id: e.record_id,
+            file_name: e.file_name,
+            file_size: e.file_size,
+            file_md5: e.file_md5,
+            tags: e.tags,
+            remark: e.remark,
+            download_count: e.download_count,
+            require_confirm,
+            timestamp: e.timestamp,
+        }).collect();
+        Self::write_msg(send, &Message::ShareListResponse(ShareListResponse {
+            instance_name,
+            require_confirm,
+            entries: shared_files,
+        })).await?;
         Ok(())
     }
 
@@ -2071,6 +2145,37 @@ impl TransferService {
         *self.iroh_stream_count.write().await = iroh_stream_count;
     }
 
+    pub async fn update_sharing_config(
+        &self,
+        instance_name: String,
+        enable_sharing: bool,
+        sharing_require_confirm: bool,
+    ) {
+        *self.instance_name.write().await = instance_name;
+        *self.enable_sharing.write().await = enable_sharing;
+        *self.sharing_require_confirm.write().await = sharing_require_confirm;
+    }
+
+    pub fn share_store(&self) -> Arc<ShareStore> {
+        self.share_store.clone()
+    }
+
+    pub async fn query_device_shares(&self, transfer_addr: &str) -> anyhow::Result<ShareListResponse> {
+        let addr: std::net::SocketAddr = transfer_addr.parse()
+            .map_err(|e| anyhow::anyhow!("invalid addr: {}", e))?;
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        let (mut read_half, mut write_half) = stream.into_split();
+        let instance_id = uuid::Uuid::new_v4().to_string();
+        Self::write_msg(&mut write_half, &Message::ShareListRequest(ShareListRequest {
+            requester_instance_id: instance_id,
+        })).await?;
+        match Self::read_msg(&mut read_half).await? {
+            Message::ShareListResponse(resp) => Ok(resp),
+            _ => Err(anyhow::anyhow!("unexpected response to ShareListRequest")),
+        }
+    }
+
     pub async fn update_max_concurrent(&self, n: usize) {
         *self.semaphore.write().await = Arc::new(Semaphore::new(n));
     }
@@ -2135,6 +2240,10 @@ impl Clone for TransferService {
             iroh_stream_count: self.iroh_stream_count.clone(),
             message_store: self.message_store.clone(),
             history_store: self.history_store.clone(),
+            share_store: self.share_store.clone(),
+            instance_name: self.instance_name.clone(),
+            enable_sharing: self.enable_sharing.clone(),
+            sharing_require_confirm: self.sharing_require_confirm.clone(),
             semaphore: self.semaphore.clone(),
         }
     }

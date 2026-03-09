@@ -13,7 +13,7 @@ pub mod signal_client;
 
 pub use config::{Config, generate_random_name};
 pub use discovery::{DiscoveryService, Device};
-pub use transfer::{TransferService, scan_directory, calculate_total_size, count_files, ProgressTracker, TransferProgress, TransferRecord, HistoryStore};
+pub use transfer::{TransferService, scan_directory, calculate_total_size, count_files, ProgressTracker, TransferProgress, TransferRecord, HistoryStore, ShareEntry, ShareStore, BookmarkEntry, BookmarkStore};
 pub use auth::AuthManager;
 pub use compression::Compressor;
 pub use tls::TlsManager;

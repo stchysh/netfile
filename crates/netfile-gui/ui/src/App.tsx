@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import DeviceList from './components/DeviceList'
 import TransferQueue from './components/TransferQueue'
 import TransferHistory from './components/TransferHistory'
+import ShareBrowser from './components/ShareBrowser'
 import Settings from './components/Settings'
 import './App.css'
 
@@ -38,7 +39,7 @@ function App() {
   const [devices, setDevices] = useState<Device[]>([])
   const [transfers, setTransfers] = useState<Transfer[]>([])
   const [showSettings, setShowSettings] = useState(false)
-  const [activePanel, setActivePanel] = useState<'queue' | 'history'>('queue')
+  const [activePanel, setActivePanel] = useState<'queue' | 'history' | 'share'>('queue')
 
   const devicesRef = useRef<string>('')
   const transfersRef = useRef<string>('')
@@ -118,12 +119,16 @@ function App() {
             >
               传输记录
             </button>
+            <button
+              className={`panel-tab ${activePanel === 'share' ? 'panel-tab-active' : ''}`}
+              onClick={() => setActivePanel('share')}
+            >
+              共享
+            </button>
           </div>
-          {activePanel === 'queue' ? (
-            <TransferQueue transfers={transfers} />
-          ) : (
-            <TransferHistory />
-          )}
+          {activePanel === 'queue' && <TransferQueue transfers={transfers} />}
+          {activePanel === 'history' && <TransferHistory />}
+          {activePanel === 'share' && <ShareBrowser />}
         </div>
       </div>
 

@@ -1,0 +1,245 @@
+.share-browser {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: white;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.share-browser-header {
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.share-header-top {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.share-view-tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.share-view-tab {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #dfe6e9;
+  border-radius: 6px;
+  background-color: transparent;
+  color: #636e72;
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+
+.share-view-tab.active {
+  background-color: #3498db;
+  border-color: #3498db;
+  color: white;
+}
+
+.share-search-input {
+  flex: 1;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #dfe6e9;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  outline: none;
+}
+
+.share-search-input:focus {
+  border-color: #3498db;
+}
+
+.share-refresh-btn {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #dfe6e9;
+  border-radius: 6px;
+  background-color: transparent;
+  color: #636e72;
+  cursor: pointer;
+  font-size: 0.8125rem;
+  flex-shrink: 0;
+}
+
+.share-refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.share-tag-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.share-tag-chip {
+  padding: 0.15rem 0.5rem;
+  border: 1px solid #dfe6e9;
+  border-radius: 12px;
+  background-color: transparent;
+  color: #636e72;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.share-tag-chip.active {
+  background-color: #3498db;
+  border-color: #3498db;
+  color: white;
+}
+
+.share-browser-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.5rem;
+  min-height: 0;
+}
+
+.share-device-group {
+  margin-bottom: 1rem;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.share-device-header {
+  padding: 0.5rem 0.75rem;
+  background-color: #f8f9fa;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  user-select: none;
+}
+
+.share-device-toggle {
+  font-size: 0.7rem;
+  color: #7f8c8d;
+}
+
+.share-device-name {
+  font-weight: 600;
+  color: #2c3e50;
+  font-size: 0.9rem;
+}
+
+.share-device-count {
+  font-size: 0.8125rem;
+  color: #7f8c8d;
+}
+
+.share-device-error {
+  font-size: 0.75rem;
+  color: #e74c3c;
+  margin-left: auto;
+}
+
+.share-file-item {
+  padding: 0.625rem 0.75rem;
+  border-top: 1px solid #e9ecef;
+  background-color: white;
+}
+
+.share-device-group > .share-file-item:first-child {
+  border-top: 1px solid #e9ecef;
+}
+
+.share-file-name {
+  font-weight: 500;
+  color: #2c3e50;
+  font-size: 0.9rem;
+  margin-bottom: 0.2rem;
+}
+
+.share-file-remark {
+  font-size: 0.8rem;
+  color: #7f8c8d;
+  margin-bottom: 0.2rem;
+}
+
+.share-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #7f8c8d;
+  margin-bottom: 0.3rem;
+}
+
+.share-file-size {
+  font-weight: 500;
+}
+
+.share-file-source {
+  color: #95a5a6;
+}
+
+.share-file-tags {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.share-tag {
+  padding: 0.05rem 0.35rem;
+  background-color: #e8f4fd;
+  border-radius: 10px;
+  color: #2980b9;
+  font-size: 0.7rem;
+}
+
+.share-file-heat {
+  color: #e67e22;
+}
+
+.share-confirm-badge {
+  padding: 0.05rem 0.35rem;
+  background-color: #ffeaa7;
+  border-radius: 4px;
+  color: #e17055;
+  font-size: 0.7rem;
+}
+
+.share-file-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.share-action-btn {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid #b2bec3;
+  border-radius: 4px;
+  background-color: transparent;
+  color: #636e72;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.share-action-btn:hover:not(:disabled) {
+  background-color: #dfe6e9;
+}
+
+.share-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.share-download-btn {
+  border-color: #3498db;
+  color: #3498db;
+}
+
+.share-download-btn:hover {
+  background-color: #ebf5fb;
+}
+
+.share-bookmarked-btn {
+  border-color: #f39c12;
+  color: #f39c12;
+}

@@ -15,10 +15,65 @@ interface TransferRecord {
   transfer_method?: string
 }
 
+interface ShareEntry {
+  record_id: string
+  file_name: string
+  file_size: number
+  save_path: string
+  file_md5?: string
+  tags: string[]
+  remark: string
+  excluded: boolean
+  download_count: number
+  timestamp: number
+}
+
 function methodLabel(method?: string): string {
   if (method === 'lan') return 'LAN'
   if (method === 'iroh') return 'NAT'
   return ''
+}
+
+function TagEditor({
+  tags,
+  onChange,
+}: {
+  tags: string[]
+  onChange: (tags: string[]) => void
+}) {
+  const [input, setInput] = useState('')
+
+  const addTag = () => {
+    const t = input.trim()
+    if (!t || tags.includes(t) || tags.length >= 10) return
+    onChange([...tags, t])
+    setInput('')
+  }
+
+  const removeTag = (tag: string) => {
+    onChange(tags.filter((t) => t !== tag))
+  }
+
+  return (
+    <div className="tag-editor">
+      {tags.map((tag) => (
+        <span key={tag} className="tag-chip">
+          {tag}
+          <button className="tag-remove" onClick={() => removeTag(tag)}>×</button>
+        </span>
+      ))}
+      <input
+        className="tag-input"
+        placeholder="添加标签"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); addTag() }
+        }}
+        maxLength={32}
+      />
+    </div>
+  )
 }
 
 function TransferHistory() {
@@ -27,6 +82,8 @@ function TransferHistory() {
   const [searchQuery, setSearchQuery] = useState('')
   const [pageSize, setPageSize] = useState(20)
   const [currentPage, setCurrentPage] = useState(0)
+  const [shareEntries, setShareEntries] = useState<Record<string, ShareEntry>>({})
+  const lastShareJsonRef = useRef<string>('')
 
   useEffect(() => {
     const load = async () => {
@@ -41,6 +98,22 @@ function TransferHistory() {
         console.error('Failed to load transfer history:', error)
       }
     }
+    const loadShares = async () => {
+      try {
+        const entries = await invoke<ShareEntry[]>('get_share_entries')
+        const json = JSON.stringify(entries)
+        if (json !== lastShareJsonRef.current) {
+          lastShareJsonRef.current = json
+          const map: Record<string, ShareEntry> = {}
+          for (const e of entries) {
+            map[e.record_id] = e
+          }
+          setShareEntries(map)
+        }
+      } catch (error) {
+        console.error('Failed to load share entries:', error)
+      }
+    }
     const loadConfig = async () => {
       try {
         const config = await invoke<any>('get_config')
@@ -50,8 +123,9 @@ function TransferHistory() {
       }
     }
     load()
+    loadShares()
     loadConfig()
-    const interval = setInterval(load, 3000)
+    const interval = setInterval(() => { load(); loadShares() }, 3000)
     return () => clearInterval(interval)
   }, [])
 
@@ -88,6 +162,42 @@ function TransferHistory() {
       lastJsonRef.current = '[]'
     } catch (error) {
       console.error('Failed to clear history:', error)
+    }
+  }
+
+  const handleToggleExcluded = async (recordId: string, current: boolean) => {
+    try {
+      await invoke('set_share_excluded', { recordId, excluded: !current })
+      setShareEntries((prev) => {
+        if (!prev[recordId]) return prev
+        return { ...prev, [recordId]: { ...prev[recordId], excluded: !current } }
+      })
+    } catch (error) {
+      console.error('Failed to toggle share excluded:', error)
+    }
+  }
+
+  const handleUpdateTags = async (recordId: string, tags: string[]) => {
+    try {
+      await invoke('update_share_tags', { recordId, tags })
+      setShareEntries((prev) => {
+        if (!prev[recordId]) return prev
+        return { ...prev, [recordId]: { ...prev[recordId], tags } }
+      })
+    } catch (error) {
+      console.error('Failed to update tags:', error)
+    }
+  }
+
+  const handleUpdateRemark = async (recordId: string, remark: string) => {
+    try {
+      await invoke('update_share_remark', { recordId, remark })
+      setShareEntries((prev) => {
+        if (!prev[recordId]) return prev
+        return { ...prev, [recordId]: { ...prev[recordId], remark } }
+      })
+    } catch (error) {
+      console.error('Failed to update remark:', error)
     }
   }
 
@@ -144,7 +254,10 @@ function TransferHistory() {
           </div>
         ) : (
           <>
-          {pagedRecords.map((record) => (
+          {pagedRecords.map((record) => {
+            const shareEntry = shareEntries[record.id]
+            const isCompletedReceive = record.status === 'completed' && record.direction === 'receive'
+            return (
             <div
               key={record.id}
               className={`history-item ${record.status === 'failed' ? 'history-item-error' : ''}`}
@@ -178,6 +291,36 @@ function TransferHistory() {
                   </button>
                 </div>
               )}
+              {isCompletedReceive && shareEntry && (
+                <div className="share-meta-section">
+                  <div className="share-remark-row">
+                    <input
+                      className="share-remark-input"
+                      placeholder="添加备注（最多100字）"
+                      value={shareEntry.remark}
+                      maxLength={100}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setShareEntries((prev) => ({
+                          ...prev,
+                          [record.id]: { ...prev[record.id], remark: v },
+                        }))
+                      }}
+                      onBlur={() => handleUpdateRemark(record.id, shareEntry.remark)}
+                    />
+                    <button
+                      className={`share-exclude-btn ${shareEntry.excluded ? 'share-excluded' : ''}`}
+                      onClick={() => handleToggleExcluded(record.id, shareEntry.excluded)}
+                    >
+                      {shareEntry.excluded ? '已不共享' : '共享中'}
+                    </button>
+                  </div>
+                  <TagEditor
+                    tags={shareEntry.tags}
+                    onChange={(tags) => handleUpdateTags(record.id, tags)}
+                  />
+                </div>
+              )}
               <div className="history-item-meta">
                 <span className="history-size">{formatSize(record.file_size)}</span>
                 <span className="history-meta-right">
@@ -188,7 +331,7 @@ function TransferHistory() {
                 </span>
               </div>
             </div>
-          ))}
+          )})}
           {totalPages > 1 && (
             <div className="history-pagination">
               <button

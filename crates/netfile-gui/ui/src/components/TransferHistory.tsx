@@ -26,6 +26,7 @@ interface ShareEntry {
   excluded: boolean
   download_count: number
   timestamp: number
+  file_exists: boolean
 }
 
 function methodLabel(method?: string): string {
@@ -352,12 +353,16 @@ function TransferHistory() {
                       }}
                       onBlur={() => handleUpdateRemark(record.id, shareEntry.remark)}
                     />
-                    <button
-                      className={`share-exclude-btn ${shareEntry.excluded ? 'share-excluded' : ''}`}
-                      onClick={() => handleToggleExcluded(record.id, shareEntry.excluded)}
-                    >
-                      {shareEntry.excluded ? '已不共享' : '共享中'}
-                    </button>
+                    {!shareEntry.file_exists ? (
+                      <span className="share-file-missing">文件不存在</span>
+                    ) : (
+                      <button
+                        className={`share-exclude-btn ${shareEntry.excluded ? 'share-excluded' : ''}`}
+                        onClick={() => handleToggleExcluded(record.id, shareEntry.excluded)}
+                      >
+                        {shareEntry.excluded ? '已不共享' : '共享中'}
+                      </button>
+                    )}
                   </div>
                   <TagEditor
                     tags={shareEntry.tags}

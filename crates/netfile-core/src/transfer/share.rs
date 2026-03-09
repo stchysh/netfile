@@ -21,6 +21,8 @@ pub struct ShareEntry {
     pub excluded: bool,
     pub download_count: u32,
     pub timestamp: u64,
+    #[serde(default)]
+    pub file_exists: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,6 +258,7 @@ impl ShareStore {
                 excluded: false,
                 download_count: 0,
                 timestamp: record.timestamp,
+                file_exists: false,
             });
         }
         // Prepend new entries (most recent first)

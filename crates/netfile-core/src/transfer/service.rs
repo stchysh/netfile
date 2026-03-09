@@ -469,6 +469,7 @@ impl TransferService {
             excluded: false,
             download_count: 0,
             timestamp: ts,
+            file_exists: false,
         };
         let _ = self.share_store.upsert_entry(share_entry).await;
 
@@ -785,6 +786,7 @@ impl TransferService {
             excluded: false,
             download_count: 0,
             timestamp: ts,
+            file_exists: false,
         };
         let _ = self.share_store.upsert_entry(share_entry).await;
 
@@ -1648,6 +1650,7 @@ impl TransferService {
             excluded: false,
             download_count: 0,
             timestamp: ts,
+            file_exists: false,
         };
         let _ = self.share_store.upsert_entry(share_entry).await;
         {
@@ -2085,6 +2088,7 @@ impl TransferService {
             excluded: false,
             download_count: 0,
             timestamp: ts,
+            file_exists: false,
         };
         let _ = self.share_store.upsert_entry(share_entry).await;
         {

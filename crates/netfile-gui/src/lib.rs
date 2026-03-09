@@ -420,7 +420,11 @@ async fn delete_transfer_records(state: State<'_, AppState>, ids: Vec<String>) -
 
 #[tauri::command]
 async fn get_share_entries(state: State<'_, AppState>) -> Result<Vec<ShareEntry>, String> {
-    Ok(state.share_store.load_entries().await)
+    let mut entries = state.share_store.load_entries().await;
+    for entry in &mut entries {
+        entry.file_exists = std::path::Path::new(&entry.save_path).exists();
+    }
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -614,6 +618,7 @@ async fn add_local_file_to_share(
         excluded: false,
         download_count: 0,
         timestamp,
+        file_exists: false,
     };
 
     state.share_store.upsert_entry(entry).await.map_err(|e| e.to_string())?;

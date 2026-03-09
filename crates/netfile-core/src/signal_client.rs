@@ -309,7 +309,6 @@ impl SignalClient {
             S2cMsg::Registered { friends, observed_addr, stun_addr, iroh_relay_url } => {
                 info!("received Registered: friends={}, observed_addr={}", friends.len(), observed_addr);
                 *self.friends.write().await = friends;
-                *self.status.write().await = SignalStatus::Connected;
 
                 if let Some(addr) = stun_addr {
                     *self.stun_addr.write().await = Some(addr);
@@ -331,6 +330,8 @@ impl SignalClient {
                         let _ = self.send_msg(&C2sMsg::UpdateTransferAddr { transfer_addr: full_addr }).await;
                     }
                 }
+
+                *self.status.write().await = SignalStatus::Connected;
             }
             S2cMsg::FriendOnline { device_id, instance_name, transfer_addr, iroh_addr } => {
                 let mut friends = self.friends.write().await;

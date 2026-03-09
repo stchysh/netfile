@@ -29,6 +29,8 @@ pub struct BookmarkEntry {
     pub file_id: String,
     pub file_name: String,
     pub file_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_md5: Option<String>,
     pub tags: Vec<String>,
     pub remark: String,
     pub source_instance_id: String,

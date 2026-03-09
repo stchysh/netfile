@@ -450,6 +450,7 @@ async fn query_all_shares(state: State<'_, AppState>) -> Result<Vec<serde_json::
                     "file_name": e.file_name,
                     "file_size": e.file_size,
                     "file_md5": e.file_md5,
+                    "save_path": e.save_path,
                     "tags": e.tags,
                     "remark": e.remark,
                     "download_count": e.download_count,
@@ -521,6 +522,35 @@ async fn remove_bookmark(
     id: String,
 ) -> Result<(), String> {
     state.bookmark_store.remove_bookmark(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn request_file_download(
+    state: State<'_, AppState>,
+    transfer_addr: String,
+    file_md5: String,
+) -> Result<(), String> {
+    state.transfer_service.request_download(&transfer_addr, &file_md5, None).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn request_file_download_to(
+    state: State<'_, AppState>,
+    transfer_addr: String,
+    file_md5: String,
+    save_dir: String,
+) -> Result<(), String> {
+    let dir = std::path::PathBuf::from(&save_dir);
+    state.transfer_service.request_download(&transfer_addr, &file_md5, Some(dir)).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn copy_local_file(src_path: String, dest_dir: String) -> Result<(), String> {
+    let src = std::path::Path::new(&src_path);
+    let file_name = src.file_name().ok_or_else(|| "Invalid source path".to_string())?;
+    let dest = std::path::Path::new(&dest_dir).join(file_name);
+    tokio::fs::copy(src, &dest).await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -879,6 +909,9 @@ pub fn run() {
             add_bookmark,
             remove_bookmark,
             add_local_file_to_share,
+            request_file_download,
+            request_file_download_to,
+            copy_local_file,
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {

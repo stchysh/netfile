@@ -16,6 +16,8 @@ pub enum Message {
     DataStreamHeader(DataStreamHeader),
     ShareListRequest(ShareListRequest),
     ShareListResponse(ShareListResponse),
+    DownloadRequest(DownloadRequest),
+    DownloadAck(DownloadAck),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,19 @@ pub struct ShareListResponse {
     pub instance_name: String,
     pub require_confirm: bool,
     pub entries: Vec<SharedFileInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadRequest {
+    pub file_md5: String,
+    pub requester_addr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadAck {
+    pub success: bool,
+    pub file_id: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

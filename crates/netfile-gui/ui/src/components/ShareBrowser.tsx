@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import './ShareBrowser.css'
 
 interface SharedFileInfo {
@@ -7,6 +8,7 @@ interface SharedFileInfo {
   file_name: string
   file_size: number
   file_md5?: string
+  save_path?: string
   tags: string[]
   remark: string
   download_count: number
@@ -22,6 +24,7 @@ interface DeviceShares {
   files: SharedFileInfo[]
   loaded: boolean
   error?: string
+  is_self?: boolean
 }
 
 interface BookmarkEntry {
@@ -29,6 +32,7 @@ interface BookmarkEntry {
   file_id: string
   file_name: string
   file_size: number
+  file_md5?: string
   tags: string[]
   remark: string
   source_instance_id: string
@@ -93,14 +97,38 @@ function ShareBrowser() {
   }
 
   const handleDownload = async (device: DeviceShares, file: SharedFileInfo) => {
+    if (!file.file_md5) return
     try {
-      await invoke('send_file', {
-        targetAddr: device.transfer_addr,
-        filePath: file.file_name,
-        enableCompression: false,
+      await invoke('request_file_download', {
+        transferAddr: device.transfer_addr,
+        fileMd5: file.file_md5,
       })
     } catch (error) {
       console.error('Failed to initiate download:', error)
+    }
+  }
+
+  const handleSaveAs = async (device: DeviceShares, file: SharedFileInfo) => {
+    const destDir = await open({ directory: true, multiple: false })
+    if (!destDir) return
+    const dir = typeof destDir === 'string' ? destDir : (destDir as string[])[0]
+    if (device.is_self && file.save_path) {
+      try {
+        await invoke('copy_local_file', { srcPath: file.save_path, destDir: dir })
+      } catch (error) {
+        console.error('Failed to copy local file:', error)
+      }
+    } else {
+      if (!file.file_md5) return
+      try {
+        await invoke('request_file_download_to', {
+          transferAddr: device.transfer_addr,
+          fileMd5: file.file_md5,
+          saveDir: dir,
+        })
+      } catch (error) {
+        console.error('Failed to initiate download to dir:', error)
+      }
     }
   }
 
@@ -111,6 +139,7 @@ function ShareBrowser() {
         file_id: file.file_id,
         file_name: file.file_name,
         file_size: file.file_size,
+        file_md5: file.file_md5,
         tags: file.tags,
         remark: file.remark,
         source_instance_id: device.instance_id,
@@ -132,6 +161,34 @@ function ShareBrowser() {
       setBookmarks((prev) => prev.filter((b) => b.id !== id))
     } catch (error) {
       console.error('Failed to remove bookmark:', error)
+    }
+  }
+
+  const handleBookmarkDownload = async (bm: BookmarkEntry) => {
+    if (!bm.file_md5) return
+    try {
+      await invoke('request_file_download', {
+        transferAddr: bm.source_transfer_addr,
+        fileMd5: bm.file_md5,
+      })
+    } catch (error) {
+      console.error('Failed to download bookmark:', error)
+    }
+  }
+
+  const handleBookmarkSaveAs = async (bm: BookmarkEntry) => {
+    if (!bm.file_md5) return
+    const destDir = await open({ directory: true, multiple: false })
+    if (!destDir) return
+    const dir = typeof destDir === 'string' ? destDir : (destDir as string[])[0]
+    try {
+      await invoke('request_file_download_to', {
+        transferAddr: bm.source_transfer_addr,
+        fileMd5: bm.file_md5,
+        saveDir: dir,
+      })
+    } catch (error) {
+      console.error('Failed to save bookmark as:', error)
     }
   }
 
@@ -228,6 +285,20 @@ function ShareBrowser() {
                 </div>
                 <div className="share-file-actions">
                   <button
+                    className="share-action-btn share-download-btn"
+                    onClick={() => handleBookmarkDownload(bm)}
+                    disabled={!bm.file_md5}
+                  >
+                    下载
+                  </button>
+                  <button
+                    className="share-action-btn"
+                    onClick={() => handleBookmarkSaveAs(bm)}
+                    disabled={!bm.file_md5}
+                  >
+                    另存为
+                  </button>
+                  <button
                     className="share-action-btn"
                     onClick={() => handleRemoveBookmark(bm.id)}
                   >
@@ -279,8 +350,16 @@ function ShareBrowser() {
                         <button
                           className="share-action-btn share-download-btn"
                           onClick={() => handleDownload(device, file)}
+                          disabled={!file.file_md5}
                         >
                           下载
+                        </button>
+                        <button
+                          className="share-action-btn"
+                          onClick={() => handleSaveAs(device, file)}
+                          disabled={!file.file_md5 && !(device.is_self && file.save_path)}
+                        >
+                          另存为
                         </button>
                         <button
                           className={`share-action-btn ${isBookmarked ? 'share-bookmarked-btn' : ''}`}

@@ -3,7 +3,7 @@ use super::history::{HistoryStore, TransferRecord};
 use super::share::{ShareEntry, ShareStore};
 use sha2::{Digest, Sha256};
 use super::progress::ProgressTracker;
-use crate::protocol::{DataStreamHeader, Message, ShareListRequest, ShareListResponse, SharedFileInfo, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
+use crate::protocol::{DataStreamHeader, DownloadAck, DownloadRequest, Message, ShareListRequest, ShareListResponse, SharedFileInfo, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
 use crate::message_store::{ChatMessage, MessageStore};
 use crate::iroh_net::IrohManager;
 use anyhow::Result;
@@ -529,6 +529,9 @@ impl TransferService {
             Message::ShareListRequest(_req) => {
                 self.handle_share_list_request(send).await?;
             }
+            Message::DownloadRequest(req) => {
+                self.handle_download_request(send, req).await?;
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 warn!("Unexpected message type");
@@ -825,6 +828,88 @@ impl TransferService {
             require_confirm,
             entries: shared_files,
         })).await?;
+        Ok(())
+    }
+
+    async fn handle_download_request<W: AsyncWrite + Unpin>(&self, send: &mut W, req: DownloadRequest) -> Result<()> {
+        let enable_sharing = *self.enable_sharing.read().await;
+        if !enable_sharing {
+            Self::write_msg(send, &Message::DownloadAck(DownloadAck {
+                success: false,
+                file_id: None,
+                error: Some("Sharing is disabled".to_string()),
+            })).await?;
+            return Ok(());
+        }
+
+        let entries = self.share_store.get_shared_entries().await;
+        let entry = entries.into_iter().find(|e| {
+            e.file_md5.as_deref() == Some(req.file_md5.as_str())
+                && std::path::Path::new(&e.save_path).exists()
+        });
+
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                Self::write_msg(send, &Message::DownloadAck(DownloadAck {
+                    success: false,
+                    file_id: None,
+                    error: Some("File not found or unavailable".to_string()),
+                })).await?;
+                return Ok(());
+            }
+        };
+
+        let file_path = std::path::PathBuf::from(&entry.save_path);
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let meta = match tokio::fs::metadata(&file_path).await {
+            Ok(m) => m,
+            Err(e) => {
+                Self::write_msg(send, &Message::DownloadAck(DownloadAck {
+                    success: false,
+                    file_id: None,
+                    error: Some(format!("Cannot read file: {}", e)),
+                })).await?;
+                return Ok(());
+            }
+        };
+        let file_size = meta.len();
+
+        let file_id = {
+            let mut h = Sha256::new();
+            h.update(file_name.as_bytes());
+            h.update(&file_size.to_le_bytes());
+            let r = h.finalize();
+            r[..16].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        };
+
+        Self::write_msg(send, &Message::DownloadAck(DownloadAck {
+            success: true,
+            file_id: Some(file_id),
+            error: None,
+        })).await?;
+
+        let target_addr: std::net::SocketAddr = match req.requester_addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("Invalid requester_addr {}: {}", req.requester_addr, e);
+                return Ok(());
+            }
+        };
+
+        let _ = self.share_store.increment_download_count(&entry.record_id).await;
+
+        let service = Arc::new(self.clone());
+        tokio::spawn(async move {
+            if let Err(e) = service.send_file_compressed(file_path, target_addr, false).await {
+                warn!("Download send to {} failed: {}", target_addr, e);
+            }
+        });
+
         Ok(())
     }
 
@@ -2197,6 +2282,37 @@ impl TransferService {
         match Self::read_msg(&mut read_half).await? {
             Message::ShareListResponse(resp) => Ok(resp),
             _ => Err(anyhow::anyhow!("unexpected response to ShareListRequest")),
+        }
+    }
+
+    pub async fn request_download(
+        &self,
+        transfer_addr: &str,
+        file_md5: &str,
+        save_dir: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<()> {
+        let addr: std::net::SocketAddr = transfer_addr.parse()
+            .map_err(|e| anyhow::anyhow!("invalid addr: {}", e))?;
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        let local_addr = stream.local_addr()?;
+        let my_addr = format!("{}:{}", local_addr.ip(), self.transfer_port);
+        let (mut read_half, mut write_half) = stream.into_split();
+        Self::write_msg(&mut write_half, &Message::DownloadRequest(DownloadRequest {
+            file_md5: file_md5.to_string(),
+            requester_addr: my_addr,
+        })).await?;
+        match Self::read_msg(&mut read_half).await? {
+            Message::DownloadAck(ack) => {
+                if !ack.success {
+                    return Err(anyhow::anyhow!("{}", ack.error.unwrap_or_default()));
+                }
+                if let (Some(file_id), Some(dir)) = (ack.file_id, save_dir) {
+                    self.save_as_paths.write().await.insert(file_id, dir);
+                }
+                Ok(())
+            }
+            _ => Err(anyhow::anyhow!("unexpected response to DownloadRequest")),
         }
     }
 

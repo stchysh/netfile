@@ -1,0 +1,97 @@
+services:
+  signal:
+    build:
+      context: .
+      dockerfile: Dockerfile.signal
+    networks:
+      net_relay:
+        ipv4_address: 10.10.0.10
+    cap_add:
+      - NET_ADMIN
+
+  nat1:
+    build:
+      context: .
+      dockerfile: Dockerfile.nat
+    networks:
+      net_internal_a:
+        ipv4_address: 172.16.1.1
+      net_relay:
+        ipv4_address: 10.10.0.2
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - INTERNAL_NET=172.16.1.0/24
+      - EXTERNAL_IF=eth1
+      - LATENCY_MS=50
+    sysctls:
+      - net.ipv4.ip_forward=1
+
+  nat2:
+    build:
+      context: .
+      dockerfile: Dockerfile.nat
+    networks:
+      net_internal_b:
+        ipv4_address: 172.16.2.1
+      net_relay:
+        ipv4_address: 10.10.0.3
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - INTERNAL_NET=172.16.2.0/24
+      - EXTERNAL_IF=eth1
+      - LATENCY_MS=50
+    sysctls:
+      - net.ipv4.ip_forward=1
+
+  client1:
+    build:
+      context: ../..
+      dockerfile: docker/double-nat/Dockerfile.client
+    networks:
+      net_internal_a:
+        ipv4_address: 172.16.1.2
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - SIGNAL_ADDR=10.10.0.10:7878
+      - ROLE=sender
+      - GW=172.16.1.1
+    depends_on:
+      - signal
+      - nat1
+
+  client2:
+    build:
+      context: ../..
+      dockerfile: docker/double-nat/Dockerfile.client
+    networks:
+      net_internal_b:
+        ipv4_address: 172.16.2.2
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - SIGNAL_ADDR=10.10.0.10:7878
+      - ROLE=receiver
+      - GW=172.16.2.1
+    depends_on:
+      - signal
+      - nat2
+
+networks:
+  net_relay:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24
+  net_internal_a:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.16.1.0/24
+  net_internal_b:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.16.2.0/24

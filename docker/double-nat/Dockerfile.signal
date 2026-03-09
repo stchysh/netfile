@@ -1,0 +1,4 @@
+FROM alpine:3.20
+RUN apk add --no-cache nmap-ncat
+EXPOSE 7878
+CMD ["ncat", "-l", "-k", "-p", "7878"]

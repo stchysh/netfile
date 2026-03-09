@@ -286,7 +286,7 @@ impl TransferService {
         let mut channel_senders = Vec::with_capacity(stream_count as usize);
         let mut channel_receivers = Vec::with_capacity(stream_count as usize);
         for _ in 0..stream_count {
-            let (tx, rx) = mpsc::channel::<(u32, bool, Vec<u8>)>(16);
+            let (tx, rx) = mpsc::channel::<(u32, bool, Vec<u8>)>(64);
             channel_senders.push(tx);
             channel_receivers.push(rx);
         }

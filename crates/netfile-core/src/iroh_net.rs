@@ -37,11 +37,11 @@ impl IrohManager {
         };
 
         let stream_window_bytes = stream_window_mb.max(8).min(256) as u64 * 1024 * 1024;
-        let conn_window_bytes = stream_window_bytes * 2;
+        let conn_window_bytes = stream_window_bytes * 8;
         info!("iroh QUIC window: stream={}MB conn={}MB", stream_window_bytes / 1024 / 1024, conn_window_bytes / 1024 / 1024);
         let transport_config = QuicTransportConfig::builder()
             .stream_receive_window(VarInt::try_from(stream_window_bytes).unwrap_or(VarInt::from_u32(32 * 1024 * 1024)))
-            .receive_window(VarInt::try_from(conn_window_bytes).unwrap_or(VarInt::from_u32(64 * 1024 * 1024)))
+            .receive_window(VarInt::try_from(conn_window_bytes).unwrap_or(VarInt::from_u32(256 * 1024 * 1024)))
             .send_window(conn_window_bytes)
             .max_idle_timeout(Some(VarInt::from_u32(120_000).into()))
             .keep_alive_interval(Duration::from_secs(15))
@@ -61,6 +61,7 @@ impl IrohManager {
 
     pub async fn connect(&self, addr: EndpointAddr) -> Result<iroh::endpoint::Connection> {
         let conn = self.endpoint.connect(addr, ALPN).await?;
+        info!("iroh connected remote_id={}", conn.remote_id());
         Ok(conn)
     }
 

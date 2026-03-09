@@ -149,6 +149,33 @@ feat: message 宏支持可选字段参数
 - 创建文档前，先确认应归属的分类目录；如无对应目录则新建
 
 
+## Codex MCP 调用准则
+
+### 优先使用 Codex MCP 的场景（强制）
+以下场景必须优先通过 `mcp__codex-cli__codex` 调用 Codex，而非由 Claude 直接实现，目的是将大量 token 消耗转移到 Codex 的上下文中：
+
+1. **需要 build/test 自我验证的任务**：任务完成后需要执行 `cargo build`、`npm build`、跑测试等命令，Codex 可在内部完成"改 → 编译报错 → 修复 → 重新编译"的迭代循环，Claude 只拿最终结果。
+
+2. **大范围文件读取 + 修改**：需要先读多个文件理解上下文再修改多个文件时，这些 token 全部发生在 Codex 的上下文里。
+
+3. **多轮迭代实现任务**：实现过程中需要反复尝试、修复、验证的任务。
+
+### 使用 Codex MCP 的前提（必须满足）
+- **工作区干净**（`git status` 无无关脏文件），或在 prompt 中明确告知 Codex "工作区有无关改动，忽略它们，只修改以下文件"，避免 Codex 陷入确认循环
+- 任务边界清晰，知道要改哪些文件
+
+### 直接由 Claude 实现的场景
+- 精确的小范围修改（1-3 个文件，位置明确）
+- 工作区有大量无关脏文件且无法 stash
+- 需要与用户交互澄清需求的探索性任务
+
+### Codex MCP 调用参数规范
+- `sandbox`: 需要写文件时使用 `danger-full-access`
+- `workingDirectory`: 必须指定项目根目录
+- `reasoningEffort`: 复杂任务使用 `high`
+- `resetSession`: 新任务使用 `true` 避免上一个 session 的上下文干扰
+- prompt 中明确要求 Codex 在完成后运行 build/check 命令验证
+
 ## Subagent 调用准则
 
 ### 何时使用 Subagent

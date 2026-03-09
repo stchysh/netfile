@@ -160,8 +160,8 @@ async fn send_file(
 }
 
 #[tauri::command]
-async fn get_my_public_addr(_state: State<'_, AppState>) -> Result<Option<String>, String> {
-    Ok(None)
+async fn get_my_public_addr(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.discovery_service.get_my_public_transfer_addr().await)
 }
 
 #[tauri::command]

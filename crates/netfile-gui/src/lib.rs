@@ -524,6 +524,61 @@ async fn remove_bookmark(
 }
 
 #[tauri::command]
+async fn add_local_file_to_share(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<(), String> {
+    let config = state.config.read().await;
+    if !config.transfer.enable_sharing {
+        return Ok(());
+    }
+    let instance_name = config.instance.instance_name.clone();
+    drop(config);
+
+    let path = std::path::Path::new(&file_path);
+    let meta = tokio::fs::metadata(path).await.map_err(|e| e.to_string())?;
+    let file_name = path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_path.clone());
+    let file_size = meta.len();
+    let record_id = Uuid::new_v4().to_string();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let entry = ShareEntry {
+        record_id: record_id.clone(),
+        file_name,
+        file_size,
+        save_path: file_path.clone(),
+        file_md5: None,
+        tags: vec![instance_name],
+        remark: String::new(),
+        excluded: false,
+        download_count: 0,
+        timestamp,
+    };
+
+    state.share_store.upsert_entry(entry).await.map_err(|e| e.to_string())?;
+
+    let share_store = Arc::clone(&state.share_store);
+    let path_buf = std::path::PathBuf::from(&file_path);
+    tokio::spawn(async move {
+        match compute_file_sha256(&path_buf).await {
+            Ok(hash) => {
+                let _ = share_store.update_md5(&record_id, hash).await;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to compute sha256 for {}: {}", path_buf.display(), e);
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
     Ok(state.config.read().await.clone())
 }
@@ -823,6 +878,7 @@ pub fn run() {
             get_bookmarks,
             add_bookmark,
             remove_bookmark,
+            add_local_file_to_share,
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {

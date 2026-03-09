@@ -178,7 +178,7 @@ sequenceDiagram
 {"type":"heartbeat"}
 
 // S2C
-{"type":"registered","friends":[...],"observed_addr":"1.2.3.4"}
+{"type":"registered","friends":[...],"observed_addr":"1.2.3.4","stun_addr":"1.2.3.4:37201","iroh_relay_url":"https://relay-host:443"}
 {"type":"invite_code","code":"ABCD1234"}
 {"type":"invite_result","success":true,"friend":{...},"error":null}
 {"type":"friend_online","device_id":"...","instance_name":"...","transfer_addr":"..."}
@@ -229,19 +229,64 @@ enable_tls = false
 # 编译
 cargo build --release --package netfile-signal
 
-# 运行（仅信令，不开启 TURN 中继）
+# 运行（仅信令，内置 STUN 服务默认开启在 37201）
 ./target/release/netfile-signal
 
-# 开启 TURN 文件中继（信令 37200，中继 37201）
-./target/release/netfile-signal --relay-port 37201
+# 开启 TCP 文件中继（TURN）
+./target/release/netfile-signal --relay-port 37202
+
+# 配置自建 iroh-relay（用于加速跨 NAT QUIC 连接，见下节）
+./target/release/netfile-signal --iroh-relay-url https://your-relay-host:443
 
 # 自定义所有参数
-./target/release/netfile-signal --host 0.0.0.0 --port 37200 --relay-port 37201
+./target/release/netfile-signal \
+  --host 0.0.0.0 \
+  --port 37200 \
+  --relay-port 37202 \
+  --stun-port 37201 \
+  --stun-public-ip 1.2.3.4 \
+  --iroh-relay-url https://your-relay-host:443
 ```
+
+**启动参数说明：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--host` | `0.0.0.0` | 监听地址 |
+| `--port` | `37200` | 信令 TCP 端口 |
+| `--relay-port` | 无 | TCP 文件中继端口（不设则不开启） |
+| `--stun-enabled` | `true` | 是否开启内置 UDP STUN 服务 |
+| `--stun-port` | `port + 1` | STUN 监听 UDP 端口（默认 37201） |
+| `--stun-public-ip` | `--host` 值 | STUN 对外公告的公网 IP（host 为 0.0.0.0 时必须设置） |
+| `--iroh-relay-url` | 无 | 自建 iroh-relay 的 HTTPS URL，广播给客户端 |
 
 服务端为纯内存状态，重启后好友关系、离线消息和 relay 会话全部清空。
 
-**防火墙：** 需开放信令端口（默认 37200）的 TCP 入站；开启 TURN 中继时还需开放 relay 端口（如 37201）的 TCP 入站。
+**防火墙：** 信令端口 TCP（默认 37200）、STUN 端口 UDP（默认 37201）必须开放入站；开启 TCP 文件中继时还需开放对应端口 TCP 入站。
+
+### 自建 iroh-relay（可选，推荐国内部署）
+
+iroh-relay 是 iroh 项目提供的 QUIC 中继服务，用于在 NAT 打洞失败时为 iroh QUIC P2P 连接提供低延迟中继。默认客户端使用 iroh 官方海外节点（新加坡 / 美国），国内网络延迟高（200-500ms）会导致 QUIC 慢启动失效、传输速率极低。
+
+**部署 iroh-relay：**
+
+```bash
+# 安装（需要 Rust 工具链）
+cargo install iroh-relay
+
+# 运行（需要 HTTPS 证书，监听 443）
+iroh-relay --hostname your-relay-host --certfile cert.pem --keyfile key.pem
+```
+
+iroh-relay 需要有效的 HTTPS 证书（可用 Let's Encrypt）。详细部署文档参考 [iroh 官方文档](https://iroh.computer/docs)。
+
+**配置 netfile-signal 广播自建 relay 地址：**
+
+```bash
+./target/release/netfile-signal --iroh-relay-url https://your-relay-host:443
+```
+
+配置后，客户端在连接信令服务器时会自动收到该 URL（通过 `Registered` 消息的 `iroh_relay_url` 字段），并在建立 iroh QUIC endpoint 时切换为自建 relay，无需客户端手动配置。
 
 ### 客户端连接信令服务器
 
@@ -348,7 +393,7 @@ send_text_message(peer_instance_id, target_addr, content)
 - **网络**: Tokio TCP/UDP
 - **加密**: SHA256, Rustls, RCGen
 - **压缩**: Zstd
-- **NAT 穿透**: STUN
+- **NAT 穿透**: STUN / iroh（QUIC P2P + relay）
 - **CLI**: Clap
 - **日志**: Tracing
 - **GUI**: Tauri + React + TypeScript

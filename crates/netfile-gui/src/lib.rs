@@ -395,6 +395,30 @@ async fn clear_transfer_history(state: State<'_, AppState>) -> Result<(), String
 }
 
 #[tauri::command]
+async fn delete_transfer_record(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state
+        .history_store
+        .delete_record(&id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = state.share_store.remove_entry(&id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_transfer_records(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+    state
+        .history_store
+        .delete_records_by_ids(&ids)
+        .await
+        .map_err(|e| e.to_string())?;
+    for id in &ids {
+        let _ = state.share_store.remove_entry(id).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_share_entries(state: State<'_, AppState>) -> Result<Vec<ShareEntry>, String> {
     Ok(state.share_store.load_entries().await)
 }
@@ -889,6 +913,8 @@ pub fn run() {
             get_message_counts,
             get_transfer_history,
             clear_transfer_history,
+            delete_transfer_record,
+            delete_transfer_records,
             open_file,
             open_folder,
             get_config,

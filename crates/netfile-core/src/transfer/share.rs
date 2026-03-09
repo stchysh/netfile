@@ -217,10 +217,10 @@ impl ShareStore {
         let _guard = self.lock.lock().await;
         let mut entries = self.read_entries().await;
 
-        // Build set of valid record IDs (completed receives only)
+        // Build set of valid record IDs (all completed records, both send and receive)
         let valid_ids: std::collections::HashSet<&str> = records
             .iter()
-            .filter(|r| r.direction == "receive" && r.status == "completed")
+            .filter(|r| r.status == "completed")
             .map(|r| r.id.as_str())
             .collect();
 
@@ -230,13 +230,14 @@ impl ShareStore {
         // NOT checked here so that user remarks/tags persist even if the file is moved/deleted.
         entries.retain(|e| valid_ids.contains(e.record_id.as_str()));
 
-        // Add new entries for history records not yet in the store
+        // Add new entries for history records not yet in the store (fallback for old records
+        // that predate automatic share entry creation in service.rs)
         let existing_ids: std::collections::HashSet<String> =
             entries.iter().map(|e| e.record_id.clone()).collect();
 
         let mut new_entries: Vec<ShareEntry> = Vec::new();
         for record in records {
-            if record.direction != "receive" || record.status != "completed" {
+            if record.status != "completed" {
                 continue;
             }
             if existing_ids.contains(&record.id) {

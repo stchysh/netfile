@@ -53,6 +53,21 @@ impl HistoryStore {
         self.write_records(&[]).await
     }
 
+    pub async fn delete_record(&self, id: &str) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let mut records = self.read_records().await;
+        records.retain(|r| r.id != id);
+        self.write_records(&records).await
+    }
+
+    pub async fn delete_records_by_ids(&self, ids: &[String]) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let mut records = self.read_records().await;
+        let id_set: std::collections::HashSet<&String> = ids.iter().collect();
+        records.retain(|r| !id_set.contains(&r.id));
+        self.write_records(&records).await
+    }
+
     async fn read_records(&self) -> Vec<TransferRecord> {
         match tokio::fs::read(&self.path).await {
             Ok(data) => serde_json::from_slice(&data).unwrap_or_default(),

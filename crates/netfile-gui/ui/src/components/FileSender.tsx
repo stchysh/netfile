@@ -30,7 +30,6 @@ interface SelectedFile {
 function FileSender({ device, onClose, embedded }: Props) {
   const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([])
   const [enableCompression, setEnableCompression] = useState(false)
-  const [addToShare, setAddToShare] = useState(true)
   const [dragOver, setDragOver] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
 
@@ -135,11 +134,6 @@ function FileSender({ device, onClose, embedded }: Props) {
             filePath: file.path,
             targetAddr,
           })
-          if (addToShare) {
-            invoke('add_local_file_to_share', { filePath: file.path }).catch((e) => {
-              console.error('Failed to add file to share:', e)
-            })
-          }
         })
         .catch((error) => {
           console.error('[punch-flow][ui] send_file command failed', {
@@ -234,14 +228,6 @@ function FileSender({ device, onClose, embedded }: Props) {
                 onChange={(e) => setEnableCompression(e.target.checked)}
               />
               <span>启用压缩</span>
-            </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={addToShare}
-                onChange={(e) => setAddToShare(e.target.checked)}
-              />
-              <span>加入共享</span>
             </label>
           </div>
         </div>

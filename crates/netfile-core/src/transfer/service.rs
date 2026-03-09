@@ -1622,8 +1622,9 @@ impl TransferService {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let record_id = Uuid::new_v4().to_string();
         let _ = self.history_store.add_record(TransferRecord {
-            id: Uuid::new_v4().to_string(),
+            id: record_id.clone(),
             file_name: file_name.clone(),
             file_size,
             direction: "send".to_string(),
@@ -1634,6 +1635,31 @@ impl TransferService {
             save_path: Some(file_path.to_string_lossy().to_string()),
             transfer_method: method,
         }).await;
+
+        let instance_name = self.instance_name.read().await.clone();
+        let share_entry = ShareEntry {
+            record_id: record_id.clone(),
+            file_name: file_name.clone(),
+            file_size,
+            save_path: file_path.to_string_lossy().to_string(),
+            file_md5: None,
+            tags: vec![instance_name],
+            remark: String::new(),
+            excluded: false,
+            download_count: 0,
+            timestamp: ts,
+        };
+        let _ = self.share_store.upsert_entry(share_entry).await;
+        {
+            let store = self.share_store.clone();
+            let path = file_path.clone();
+            let rid = record_id.clone();
+            tokio::spawn(async move {
+                if let Ok(hash) = compute_file_sha256(&path).await {
+                    let _ = store.update_md5(&rid, hash).await;
+                }
+            });
+        }
 
         Ok(file_id)
     }
@@ -2033,8 +2059,9 @@ impl TransferService {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let record_id = Uuid::new_v4().to_string();
         let _ = self.history_store.add_record(TransferRecord {
-            id: Uuid::new_v4().to_string(),
+            id: record_id.clone(),
             file_name: file_name.clone(),
             file_size,
             direction: "send".to_string(),
@@ -2045,6 +2072,31 @@ impl TransferService {
             save_path: Some(file_path.to_string_lossy().to_string()),
             transfer_method: method,
         }).await;
+
+        let instance_name = self.instance_name.read().await.clone();
+        let share_entry = ShareEntry {
+            record_id: record_id.clone(),
+            file_name: file_name.clone(),
+            file_size,
+            save_path: file_path.to_string_lossy().to_string(),
+            file_md5: None,
+            tags: vec![instance_name],
+            remark: String::new(),
+            excluded: false,
+            download_count: 0,
+            timestamp: ts,
+        };
+        let _ = self.share_store.upsert_entry(share_entry).await;
+        {
+            let store = self.share_store.clone();
+            let path = file_path.clone();
+            let rid = record_id.clone();
+            tokio::spawn(async move {
+                if let Ok(hash) = compute_file_sha256(&path).await {
+                    let _ = store.update_md5(&rid, hash).await;
+                }
+            });
+        }
 
         Ok(file_id)
     }

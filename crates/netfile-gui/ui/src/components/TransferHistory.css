@@ -205,6 +205,22 @@
   cursor: not-allowed;
 }
 
+.history-delete-btn {
+  padding: 0.15rem 0.4rem;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  background-color: transparent;
+  color: #dc2626;
+  cursor: pointer;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+  margin-left: 0.5rem;
+}
+
+.history-delete-btn:hover {
+  background-color: #fff5f5;
+}
+
 .share-meta-section {
   margin: 0.375rem 0;
   display: flex;

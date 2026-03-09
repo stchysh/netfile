@@ -165,6 +165,35 @@ function TransferHistory() {
     }
   }
 
+  const handleDelete = async (id: string) => {
+    try {
+      await invoke('delete_transfer_record', { id })
+      setRecords((prev) => prev.filter((r) => r.id !== id))
+      setShareEntries((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    } catch (error) {
+      console.error('Failed to delete record:', error)
+    }
+  }
+
+  const handleClearFiltered = async (ids: string[]) => {
+    try {
+      await invoke('delete_transfer_records', { ids })
+      const idSet = new Set(ids)
+      setRecords((prev) => prev.filter((r) => !idSet.has(r.id)))
+      setShareEntries((prev) => {
+        const next = { ...prev }
+        for (const id of ids) delete next[id]
+        return next
+      })
+    } catch (error) {
+      console.error('Failed to delete filtered records:', error)
+    }
+  }
+
   const handleToggleExcluded = async (recordId: string, current: boolean) => {
     try {
       await invoke('set_share_excluded', { recordId, excluded: !current })
@@ -242,9 +271,19 @@ function TransferHistory() {
           onChange={(e) => setSearchQuery(e.target.value)}
         />
         {records.length > 0 && (
-          <button className="history-clear-button" onClick={handleClear}>
-            清空
-          </button>
+          searchQuery ? (
+            <button
+              className="history-clear-button"
+              onClick={() => handleClearFiltered(filteredRecords.map((r) => r.id))}
+              disabled={filteredRecords.length === 0}
+            >
+              清空筛选
+            </button>
+          ) : (
+            <button className="history-clear-button" onClick={handleClear}>
+              清空
+            </button>
+          )
         )}
       </div>
       <div className="transfer-history-content">
@@ -256,7 +295,6 @@ function TransferHistory() {
           <>
           {pagedRecords.map((record) => {
             const shareEntry = shareEntries[record.id]
-            const isCompletedReceive = record.status === 'completed' && record.direction === 'receive'
             return (
             <div
               key={record.id}
@@ -275,6 +313,12 @@ function TransferHistory() {
                 <span className={`history-status-label ${record.status === 'failed' ? 'status-failed' : 'status-completed'}`}>
                   {record.status === 'failed' ? '失败' : '完成'}
                 </span>
+                <button
+                  className="history-delete-btn"
+                  onClick={() => handleDelete(record.id)}
+                >
+                  删除
+                </button>
               </div>
               {record.error && (
                 <div className="history-error-msg">{record.error}</div>
@@ -291,7 +335,7 @@ function TransferHistory() {
                   </button>
                 </div>
               )}
-              {isCompletedReceive && shareEntry && (
+              {record.status === 'completed' && shareEntry && (
                 <div className="share-meta-section">
                   <div className="share-remark-row">
                     <input

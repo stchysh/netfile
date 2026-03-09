@@ -436,8 +436,40 @@ async fn query_device_shares(
 
 #[tauri::command]
 async fn query_all_shares(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
-    let devices = state.discovery_service.get_devices().await;
     let mut results = Vec::new();
+
+    // Include local device's shared files directly from ShareStore
+    {
+        let config = state.config.read().await;
+        if config.transfer.enable_sharing {
+            let entries = state.share_store.get_shared_entries().await;
+            let require_confirm = config.transfer.sharing_require_confirm;
+            let local_files: Vec<serde_json::Value> = entries.into_iter().map(|e| {
+                serde_json::json!({
+                    "file_id": e.record_id,
+                    "file_name": e.file_name,
+                    "file_size": e.file_size,
+                    "file_md5": e.file_md5,
+                    "tags": e.tags,
+                    "remark": e.remark,
+                    "download_count": e.download_count,
+                    "require_confirm": require_confirm,
+                    "timestamp": e.timestamp,
+                })
+            }).collect();
+            results.push(serde_json::json!({
+                "instance_id": config.instance.instance_id,
+                "instance_name": format!("{} (本机)", config.instance.instance_name),
+                "transfer_addr": format!("127.0.0.1:{}", state.transfer_service.local_port()),
+                "require_confirm": require_confirm,
+                "files": local_files,
+                "loaded": true,
+                "is_self": true,
+            }));
+        }
+    }
+
+    let devices = state.discovery_service.get_devices().await;
     for device in devices {
         if device.is_self {
             continue;

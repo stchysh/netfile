@@ -170,6 +170,12 @@
   color: #7f8c8d;
 }
 
+.transfer-limit-source {
+  font-size: 0.75rem;
+  color: #e67e22;
+  font-weight: 500;
+}
+
 .transfer-queued-label {
   font-size: 0.875rem;
   font-weight: 500;

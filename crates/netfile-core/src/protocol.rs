@@ -72,6 +72,8 @@ pub struct TransferRequest {
     pub password_hash: Option<String>,
     #[serde(default)]
     pub stream_count: Option<u32>,
+    #[serde(default)]
+    pub speed_limit_bytes_per_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +88,8 @@ pub struct TransferResponse {
     pub accepted: bool,
     pub save_path: Option<String>,
     pub resume_from_chunk: Option<u32>,
+    #[serde(default)]
+    pub speed_limit_bytes_per_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +210,8 @@ mod tests {
             chunk_size: 1048576,
             device_id: "device-123".to_string(),
             password_hash: Some("hash123".to_string()),
+            stream_count: None,
+            speed_limit_bytes_per_sec: None,
         };
 
         let serialized = bincode::serialize(&request).unwrap();
@@ -248,6 +254,8 @@ mod tests {
             chunk_size: 1024,
             device_id: "dev1".to_string(),
             password_hash: None,
+            stream_count: None,
+            speed_limit_bytes_per_sec: None,
         };
 
         let message = Message::TransferRequest(request.clone());

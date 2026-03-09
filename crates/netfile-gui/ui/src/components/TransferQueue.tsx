@@ -18,6 +18,7 @@ interface Transfer {
   current_file?: string
   error?: string
   transfer_method?: string
+  speed_limit_source?: string
 }
 
 function methodLabel(method?: string): string {
@@ -356,6 +357,11 @@ function TransferQueue({ transfers }: Props) {
                   <span className="transfer-meta">
                     {!transfer.paused && transfer.speed > 0 && (
                       <span className="transfer-speed">{formatSpeed(transfer.speed)}</span>
+                    )}
+                    {!transfer.paused && transfer.speed_limit_source && (
+                      <span className="transfer-limit-source">
+                        {transfer.speed_limit_source === 'sender' ? '发送端限速' : '接收端限速'}
+                      </span>
                     )}
                     {!transfer.paused && eta && (
                       <span className="transfer-eta">剩余 {eta}</span>

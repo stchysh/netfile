@@ -255,6 +255,7 @@ impl TransferService {
                     accepted: false,
                     save_path: None,
                     resume_from_chunk: None,
+                    speed_limit_bytes_per_sec: None,
                 })).await;
                 return Ok(());
             }
@@ -302,6 +303,10 @@ impl TransferService {
             accepted: true,
             save_path: Some(download_dir.to_string_lossy().to_string()),
             resume_from_chunk: None,
+            speed_limit_bytes_per_sec: {
+                let lim = *self.speed_limit_bytes_per_sec.read().await;
+                if lim > 0 { Some(lim) } else { None }
+            },
         })).await {
             data_routes.write().await.remove(&file_id);
             self.progress_tracker.remove_progress(&progress_id).await;
@@ -625,6 +630,7 @@ impl TransferService {
                     accepted: false,
                     save_path: None,
                     resume_from_chunk: None,
+                    speed_limit_bytes_per_sec: None,
                 })).await;
                 return Ok(());
             }
@@ -664,6 +670,10 @@ impl TransferService {
             accepted: true,
             save_path: Some(download_dir.to_string_lossy().to_string()),
             resume_from_chunk: if resume_from_chunk > 0 { Some(resume_from_chunk) } else { None },
+            speed_limit_bytes_per_sec: {
+                let lim = *self.speed_limit_bytes_per_sec.read().await;
+                if lim > 0 { Some(lim) } else { None }
+            },
         };
 
         if let Err(e) = Self::write_msg(send, &Message::TransferResponse(response)).await {
@@ -1391,6 +1401,21 @@ impl TransferService {
         Ok(conn)
     }
 
+    /// Returns (effective_limit_bytes_per_sec, speed_limit_source).
+    /// effective_limit = 0 means unlimited.
+    /// source = None means both sides unlimited, Some("sender"/"receiver") means that side is limiting.
+    fn negotiate_speed_limit(sender: u64, receiver: Option<u64>) -> (u64, Option<String>) {
+        match (sender, receiver.unwrap_or(0)) {
+            (0, 0) => (0, None),
+            (0, r) => (r, Some("receiver".to_string())),
+            (s, 0) => (s, Some("sender".to_string())),
+            (s, r) => {
+                if s <= r { (s, Some("sender".to_string())) }
+                else { (r, Some("receiver".to_string())) }
+            }
+        }
+    }
+
     async fn do_send_file(
         &self,
         file_path: PathBuf,
@@ -1452,6 +1477,7 @@ impl TransferService {
             device_id: String::new(),
             password_hash: None,
             stream_count: None,
+            speed_limit_bytes_per_sec: if speed_limit_bytes_per_sec > 0 { Some(speed_limit_bytes_per_sec) } else { None },
         };
 
         let stream = match TcpStream::connect(target_addr).await {
@@ -1474,7 +1500,7 @@ impl TransferService {
             return Err(e);
         }
 
-        let resume_from = {
+        let (resume_from, effective_speed_limit) = {
             let response = match Self::read_msg(&mut read_half).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -1489,15 +1515,17 @@ impl TransferService {
                     self.progress_tracker.remove_progress(&file_id).await;
                     return Err(anyhow::anyhow!("Transfer rejected by receiver"));
                 }
+                let (eff, src) = Self::negotiate_speed_limit(speed_limit_bytes_per_sec, resp.speed_limit_bytes_per_sec);
+                self.progress_tracker.set_speed_limit_source(&file_id, src).await;
                 let resume = resp.resume_from_chunk.unwrap_or(0);
                 if resume > 0 {
                     info!("[send/lan] resuming from chunk {} for {}", resume, file_id);
                 } else {
                     debug!("[send/lan] transfer accepted, starting from chunk 0 for {}", file_id);
                 }
-                resume
+                (resume, eff)
             } else {
-                0
+                (0, speed_limit_bytes_per_sec)
             }
         };
 
@@ -1580,8 +1608,8 @@ impl TransferService {
             }
             self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
 
-            if speed_limit_bytes_per_sec > 0 {
-                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+            if effective_speed_limit > 0 {
+                let delay_micros = (chunk_bytes_len * 1_000_000) / effective_speed_limit;
                 tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
             }
         }
@@ -1704,6 +1732,7 @@ impl TransferService {
             device_id: String::new(),
             password_hash: None,
             stream_count: None,
+            speed_limit_bytes_per_sec: if speed_limit_bytes_per_sec > 0 { Some(speed_limit_bytes_per_sec) } else { None },
         };
 
         let stream = TcpStream::connect(target_addr).await?;
@@ -1712,15 +1741,17 @@ impl TransferService {
 
         Self::write_msg(&mut write_half, &Message::TransferRequest(request)).await?;
 
-        let resume_from = {
+        let (resume_from, effective_speed_limit) = {
             let response = Self::read_msg(&mut read_half).await?;
             if let Message::TransferResponse(resp) = response {
                 if !resp.accepted {
                     return Err(anyhow::anyhow!("Transfer rejected by receiver"));
                 }
-                resp.resume_from_chunk.unwrap_or(0)
+                let (eff, src) = Self::negotiate_speed_limit(speed_limit_bytes_per_sec, resp.speed_limit_bytes_per_sec);
+                self.progress_tracker.set_speed_limit_source(folder_id, src).await;
+                (resp.resume_from_chunk.unwrap_or(0), eff)
             } else {
-                0
+                (0, speed_limit_bytes_per_sec)
             }
         };
 
@@ -1770,8 +1801,8 @@ impl TransferService {
             Self::write_chunk_raw(&mut write_half, chunk_index, compressed, &send_data).await?;
             self.progress_tracker.update_progress(folder_id, chunk_bytes_len).await;
 
-            if speed_limit_bytes_per_sec > 0 {
-                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+            if effective_speed_limit > 0 {
+                let delay_micros = (chunk_bytes_len * 1_000_000) / effective_speed_limit;
                 tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
             }
         }
@@ -1855,6 +1886,7 @@ impl TransferService {
             device_id: String::new(),
             password_hash: None,
             stream_count: if n_streams > 1 { Some(n_streams) } else { None },
+            speed_limit_bytes_per_sec: if speed_limit_bytes_per_sec > 0 { Some(speed_limit_bytes_per_sec) } else { None },
         };
 
         let conn = match self.iroh_get_or_connect(endpoint_addr).await {
@@ -1884,7 +1916,7 @@ impl TransferService {
             return Err(e);
         }
 
-        let resume_from = {
+        let (resume_from, effective_speed_limit) = {
             let response = match Self::read_msg(&mut recv).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -1899,15 +1931,17 @@ impl TransferService {
                     self.progress_tracker.remove_progress(&file_id).await;
                     return Err(anyhow::anyhow!("Transfer rejected by receiver"));
                 }
+                let (eff, src) = Self::negotiate_speed_limit(speed_limit_bytes_per_sec, resp.speed_limit_bytes_per_sec);
+                self.progress_tracker.set_speed_limit_source(&file_id, src).await;
                 let resume = resp.resume_from_chunk.unwrap_or(0);
                 if resume > 0 {
                     info!("[send/iroh] resuming from chunk {} for {}", resume, file_id);
                 } else {
                     debug!("[send/iroh] transfer accepted, starting from chunk 0 for {}", file_id);
                 }
-                resume
+                (resume, eff)
             } else {
-                0
+                (0, speed_limit_bytes_per_sec)
             }
         };
 
@@ -1934,7 +1968,7 @@ impl TransferService {
                 chunk_size,
                 total_chunks,
                 enable_compression,
-                speed_limit_bytes_per_sec,
+                effective_speed_limit,
                 n_streams,
             ).await {
                 Ok(h) => h,
@@ -2011,8 +2045,8 @@ impl TransferService {
                 }
                 self.progress_tracker.update_progress(&file_id, chunk_bytes_len).await;
 
-                if speed_limit_bytes_per_sec > 0 {
-                    let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+                if effective_speed_limit > 0 {
+                    let delay_micros = (chunk_bytes_len * 1_000_000) / effective_speed_limit;
                     tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
                 }
             }
@@ -2142,6 +2176,7 @@ impl TransferService {
             device_id: String::new(),
             password_hash: None,
             stream_count: None,
+            speed_limit_bytes_per_sec: if speed_limit_bytes_per_sec > 0 { Some(speed_limit_bytes_per_sec) } else { None },
         };
 
         let conn = self.iroh_get_or_connect(endpoint_addr).await?;
@@ -2149,15 +2184,17 @@ impl TransferService {
 
         Self::write_msg(&mut send, &Message::TransferRequest(request)).await?;
 
-        let resume_from = {
+        let (resume_from, effective_speed_limit) = {
             let response = Self::read_msg(&mut recv).await?;
             if let Message::TransferResponse(resp) = response {
                 if !resp.accepted {
                     return Err(anyhow::anyhow!("Transfer rejected by receiver"));
                 }
-                resp.resume_from_chunk.unwrap_or(0)
+                let (eff, src) = Self::negotiate_speed_limit(speed_limit_bytes_per_sec, resp.speed_limit_bytes_per_sec);
+                self.progress_tracker.set_speed_limit_source(folder_id, src).await;
+                (resp.resume_from_chunk.unwrap_or(0), eff)
             } else {
-                0
+                (0, speed_limit_bytes_per_sec)
             }
         };
 
@@ -2207,8 +2244,8 @@ impl TransferService {
             Self::write_chunk_raw(&mut send, chunk_index, compressed, &send_data).await?;
             self.progress_tracker.update_progress(folder_id, chunk_bytes_len).await;
 
-            if speed_limit_bytes_per_sec > 0 {
-                let delay_micros = (chunk_bytes_len * 1_000_000) / speed_limit_bytes_per_sec;
+            if effective_speed_limit > 0 {
+                let delay_micros = (chunk_bytes_len * 1_000_000) / effective_speed_limit;
                 tokio::time::sleep(tokio::time::Duration::from_micros(delay_micros)).await;
             }
         }

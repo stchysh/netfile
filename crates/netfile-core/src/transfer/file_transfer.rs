@@ -58,6 +58,7 @@ impl FileSender {
             device_id: String::new(),
             password_hash: None,
             stream_count: None,
+            speed_limit_bytes_per_sec: None,
         })
     }
 

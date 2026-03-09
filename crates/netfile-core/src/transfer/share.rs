@@ -175,8 +175,12 @@ impl ShareStore {
                     entries[idx].tags.push(tag.clone());
                 }
             }
-            // Remove this duplicate entry
-            entries.retain(|e| e.record_id != record_id);
+            // Mark this entry as excluded rather than removing it, so the
+            // transfer history can still show its share meta section
+            if let Some(e) = entries.iter_mut().find(|e| e.record_id == record_id) {
+                e.file_md5 = Some(hash);
+                e.excluded = true;
+            }
         } else {
             // No duplicate — just update the hash
             if let Some(e) = entries.iter_mut().find(|e| e.record_id == record_id) {

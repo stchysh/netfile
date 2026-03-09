@@ -321,6 +321,18 @@ function TransferHistory() {
                 <span className={`history-status-label ${record.status === 'failed' ? 'status-failed' : 'status-completed'}`}>
                   {record.status === 'failed' ? '失败' : '完成'}
                 </span>
+                {record.save_path && record.status === 'completed' && (
+                  <>
+                    {!record.file_name.endsWith('/') && (
+                      <button className="history-open-btn" onClick={() => handleOpenFile(record.save_path!)}>
+                        打开文件
+                      </button>
+                    )}
+                    <button className="history-open-btn" onClick={() => handleOpenFolder(record.save_path!, record.file_name.endsWith('/'))}>
+                      打开文件夹
+                    </button>
+                  </>
+                )}
                 <button
                   className="history-delete-btn"
                   onClick={() => handleDelete(record.id)}
@@ -330,18 +342,6 @@ function TransferHistory() {
               </div>
               {record.error && (
                 <div className="history-error-msg">{record.error}</div>
-              )}
-              {record.save_path && record.status === 'completed' && (
-                <div className="history-open-actions">
-                  {!record.file_name.endsWith('/') && (
-                    <button className="history-open-btn" onClick={() => handleOpenFile(record.save_path!)}>
-                      打开文件
-                    </button>
-                  )}
-                  <button className="history-open-btn" onClick={() => handleOpenFolder(record.save_path!, record.file_name.endsWith('/'))}>
-                    打开文件夹
-                  </button>
-                </div>
               )}
               {record.status === 'completed' && shareEntry && (
                 <div className="share-meta-section">

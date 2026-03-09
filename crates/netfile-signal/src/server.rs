@@ -27,6 +27,8 @@ pub struct ServerState {
     invite_codes: RwLock<HashMap<String, InviteEntry>>,
     offline_msgs: RwLock<HashMap<String, Vec<OfflineMsg>>>,
     pub relay_addr: Option<String>,
+    pub stun_addr: Option<String>,
+    pub iroh_relay_url: Option<String>,
 }
 
 impl ServerState {
@@ -37,6 +39,8 @@ impl ServerState {
             invite_codes: RwLock::new(HashMap::new()),
             offline_msgs: RwLock::new(HashMap::new()),
             relay_addr: None,
+            stun_addr: None,
+            iroh_relay_url: None,
         })
     }
 
@@ -47,6 +51,20 @@ impl ServerState {
             invite_codes: RwLock::new(HashMap::new()),
             offline_msgs: RwLock::new(HashMap::new()),
             relay_addr: Some(relay_addr),
+            stun_addr: None,
+            iroh_relay_url: None,
+        })
+    }
+
+    pub fn new_full(relay_addr: Option<String>, stun_addr: Option<String>, iroh_relay_url: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            online: RwLock::new(HashMap::new()),
+            friends: RwLock::new(HashMap::new()),
+            invite_codes: RwLock::new(HashMap::new()),
+            offline_msgs: RwLock::new(HashMap::new()),
+            relay_addr,
+            stun_addr,
+            iroh_relay_url,
         })
     }
 
@@ -129,7 +147,7 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
         }
     }
 
-    if write_s2c(&mut stream, &S2cMsg::Registered { friends: online_friends.clone(), observed_addr: observed_ip.clone(), relay_addr: state.relay_addr.clone() }).await.is_err() {
+    if write_s2c(&mut stream, &S2cMsg::Registered { friends: online_friends.clone(), observed_addr: observed_ip.clone(), relay_addr: state.relay_addr.clone(), stun_addr: state.stun_addr.clone(), iroh_relay_url: state.iroh_relay_url.clone() }).await.is_err() {
         warn!("[{}] failed to send Registered, disconnecting", device_id);
         return;
     }

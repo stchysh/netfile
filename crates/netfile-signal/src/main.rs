@@ -1,7 +1,9 @@
 mod protocol;
 mod server;
+mod stun_server;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +20,12 @@ struct Args {
     port: u16,
     #[arg(long)]
     relay_port: Option<u16>,
+    #[arg(long)]
+    stun_port: Option<u16>,
+    #[arg(long)]
+    stun_public_ip: Option<String>,
+    #[arg(long)]
+    iroh_relay_url: Option<String>,
 }
 
 #[tokio::main]
@@ -30,10 +38,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    let state = if let Some(relay_port) = args.relay_port {
-        let relay_addr = format!("{}:{}", args.host, relay_port);
-        let relay_listener = TcpListener::bind(&relay_addr).await?;
-        tracing::info!("Relay listener started on {}", relay_addr);
+    let relay_addr = if let Some(relay_port) = args.relay_port {
+        let addr = format!("{}:{}", args.host, relay_port);
+        let relay_listener = TcpListener::bind(&addr).await?;
+        tracing::info!("Relay listener started on {}", addr);
 
         let waiting: Arc<Mutex<HashMap<String, tokio::net::TcpStream>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -54,11 +62,23 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         });
-
-        server::ServerState::new_with_relay(relay_addr)
+        Some(addr)
     } else {
-        server::ServerState::new()
+        None
     };
+
+    let stun_addr = if let Some(stun_port) = args.stun_port {
+        let bind_addr: SocketAddr = format!("0.0.0.0:{}", stun_port).parse()?;
+        tokio::spawn(stun_server::run_stun_server(bind_addr));
+        let public_ip = args.stun_public_ip.unwrap_or_else(|| args.host.clone());
+        let addr_str = format!("{}:{}", public_ip, stun_port);
+        tracing::info!("STUN service addr announced as {}", addr_str);
+        Some(addr_str)
+    } else {
+        None
+    };
+
+    let state = server::ServerState::new_full(relay_addr, stun_addr, args.iroh_relay_url);
 
     {
         let state = state.clone();

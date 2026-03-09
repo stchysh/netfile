@@ -30,6 +30,10 @@ pub struct NetworkConfig {
     pub broadcast_interval: u64,
     #[serde(default)]
     pub signal_server_addr: String,
+    #[serde(default)]
+    pub iroh_relay_url: String,
+    #[serde(default)]
+    pub stun_servers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +182,8 @@ impl Default for NetworkConfig {
             transfer_port: 0,
             broadcast_interval: default_broadcast_interval(),
             signal_server_addr: String::new(),
+            iroh_relay_url: String::new(),
+            stun_servers: Vec::new(),
         }
     }
 }

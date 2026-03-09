@@ -66,6 +66,20 @@ impl TransferService {
         speed_limit_bytes_per_sec: u64,
         quic_stream_window_mb: u32,
     ) -> Result<Self> {
+        Self::new_with_iroh_relay(transfer_port, max_concurrent, chunk_size, data_dir, download_dir, enable_compression, speed_limit_bytes_per_sec, quic_stream_window_mb, None).await
+    }
+
+    pub async fn new_with_iroh_relay(
+        transfer_port: u16,
+        max_concurrent: usize,
+        chunk_size: u32,
+        data_dir: PathBuf,
+        download_dir: PathBuf,
+        enable_compression: bool,
+        speed_limit_bytes_per_sec: u64,
+        quic_stream_window_mb: u32,
+        iroh_relay_url: Option<String>,
+    ) -> Result<Self> {
         let port = if transfer_port == 0 {
             Self::find_available_port().await?
         } else {
@@ -73,7 +87,7 @@ impl TransferService {
         };
 
         let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        let iroh_manager = IrohManager::new(data_dir.clone(), quic_stream_window_mb).await?;
+        let iroh_manager = IrohManager::new(data_dir.clone(), quic_stream_window_mb, iroh_relay_url).await?;
 
         info!("Transfer service listening on port {} (TCP + iroh)", port);
 
@@ -286,7 +300,7 @@ impl TransferService {
         let mut channel_senders = Vec::with_capacity(stream_count as usize);
         let mut channel_receivers = Vec::with_capacity(stream_count as usize);
         for _ in 0..stream_count {
-            let (tx, rx) = mpsc::channel::<(u32, bool, Vec<u8>)>(64);
+            let (tx, rx) = mpsc::channel::<(u32, bool, Vec<u8>)>(16);
             channel_senders.push(tx);
             channel_receivers.push(rx);
         }

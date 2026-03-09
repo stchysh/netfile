@@ -61,6 +61,10 @@ pub enum S2cMsg {
         observed_addr: String,
         #[serde(default)]
         relay_addr: Option<String>,
+        #[serde(default)]
+        stun_addr: Option<String>,
+        #[serde(default)]
+        iroh_relay_url: Option<String>,
     },
     InviteCode {
         code: String,

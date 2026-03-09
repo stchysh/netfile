@@ -1,5 +1,5 @@
 use anyhow::Result;
-use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey};
 use iroh::endpoint::{QuicTransportConfig, VarInt};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ pub struct IrohManager {
 }
 
 impl IrohManager {
-    pub async fn new(data_dir: PathBuf, stream_window_mb: u32) -> Result<Arc<Self>> {
+    pub async fn new(data_dir: PathBuf, stream_window_mb: u32, relay_url: Option<String>) -> Result<Arc<Self>> {
         let key_dir = data_dir.join("iroh");
         tokio::fs::create_dir_all(&key_dir).await?;
         let key_path = key_dir.join("secret_key");
@@ -37,22 +37,37 @@ impl IrohManager {
         };
 
         let stream_window_bytes = stream_window_mb.max(8).min(256) as u64 * 1024 * 1024;
-        let conn_window_bytes = stream_window_bytes * 8;
+        let conn_window_bytes = stream_window_bytes * 2;
         info!("iroh QUIC window: stream={}MB conn={}MB", stream_window_bytes / 1024 / 1024, conn_window_bytes / 1024 / 1024);
         let transport_config = QuicTransportConfig::builder()
             .stream_receive_window(VarInt::try_from(stream_window_bytes).unwrap_or(VarInt::from_u32(32 * 1024 * 1024)))
-            .receive_window(VarInt::try_from(conn_window_bytes).unwrap_or(VarInt::from_u32(256 * 1024 * 1024)))
+            .receive_window(VarInt::try_from(conn_window_bytes).unwrap_or(VarInt::from_u32(64 * 1024 * 1024)))
             .send_window(conn_window_bytes)
             .max_idle_timeout(Some(VarInt::from_u32(120_000).into()))
             .keep_alive_interval(Duration::from_secs(15))
             .build();
 
-        let endpoint = Endpoint::builder()
+        let builder = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![ALPN.to_vec()])
-            .transport_config(transport_config)
-            .bind()
-            .await?;
+            .transport_config(transport_config);
+
+        let builder = if let Some(url_str) = relay_url.filter(|s| !s.is_empty()) {
+            match RelayMap::try_from_iter([url_str.as_str()]) {
+                Ok(relay_map) => {
+                    info!("iroh using custom relay: {}", url_str);
+                    builder.relay_mode(RelayMode::Custom(relay_map))
+                }
+                Err(e) => {
+                    warn!("Invalid iroh_relay_url {}: {}, using default relays", url_str, e);
+                    builder
+                }
+            }
+        } else {
+            builder
+        };
+
+        let endpoint = builder.bind().await?;
 
         info!("iroh endpoint started, node_id={}", endpoint.id());
 
@@ -61,7 +76,6 @@ impl IrohManager {
 
     pub async fn connect(&self, addr: EndpointAddr) -> Result<iroh::endpoint::Connection> {
         let conn = self.endpoint.connect(addr, ALPN).await?;
-        info!("iroh connected remote_id={}", conn.remote_id());
         Ok(conn)
     }
 

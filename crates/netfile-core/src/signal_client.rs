@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +60,10 @@ enum S2cMsg {
         friends: Vec<FriendInfo>,
         #[serde(default)]
         observed_addr: String,
+        #[serde(default)]
+        stun_addr: Option<String>,
+        #[serde(default)]
+        iroh_relay_url: Option<String>,
     },
     InviteCode {
         code: String,
@@ -131,6 +135,8 @@ pub struct SignalClient {
     outgoing_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     pending_invite: Arc<Mutex<Option<oneshot::Sender<String>>>>,
     pending_accept: Arc<Mutex<Option<oneshot::Sender<Result<FriendInfo, String>>>>>,
+    pub stun_addr: Arc<RwLock<Option<String>>>,
+    pub iroh_relay_url: Arc<RwLock<Option<String>>>,
 }
 
 impl SignalClient {
@@ -152,6 +158,8 @@ impl SignalClient {
             outgoing_tx: Arc::new(Mutex::new(None)),
             pending_invite: Arc::new(Mutex::new(None)),
             pending_accept: Arc::new(Mutex::new(None)),
+            stun_addr: Arc::new(RwLock::new(None)),
+            iroh_relay_url: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -294,10 +302,17 @@ impl SignalClient {
 
     async fn handle_incoming(self: &Arc<Self>, msg: S2cMsg) {
         match msg {
-            S2cMsg::Registered { friends, observed_addr } => {
+            S2cMsg::Registered { friends, observed_addr, stun_addr, iroh_relay_url } => {
                 info!("received Registered: friends={}, observed_addr={}", friends.len(), observed_addr);
                 *self.friends.write().await = friends;
                 *self.status.write().await = SignalStatus::Connected;
+
+                if let Some(addr) = stun_addr {
+                    *self.stun_addr.write().await = Some(addr);
+                }
+                if let Some(url) = iroh_relay_url {
+                    *self.iroh_relay_url.write().await = Some(url);
+                }
 
                 if !observed_addr.is_empty() {
                     let current_addr = self.transfer_addr.read().await.clone();

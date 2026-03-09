@@ -209,6 +209,20 @@ async fn confirm_transfer(
 }
 
 #[tauri::command]
+async fn confirm_transfer_save_as(
+    state: State<'_, AppState>,
+    file_id: String,
+    save_path: String,
+) -> Result<(), String> {
+    let path = PathBuf::from(&save_path);
+    if !path.exists() {
+        tokio::fs::create_dir_all(&path).await.map_err(|e| format!("{}", e))?;
+    }
+    state.transfer_service.confirm_transfer_save_as(&file_id, path).await;
+    Ok(())
+}
+
+#[tauri::command]
 async fn reject_transfer(
     state: State<'_, AppState>,
     file_id: String,
@@ -621,7 +635,6 @@ pub fn run() {
         .expect("Failed to install rustls crypto provider");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_devices,
@@ -633,6 +646,7 @@ pub fn run() {
             pause_all_transfers,
             resume_all_transfers,
             confirm_transfer,
+            confirm_transfer_save_as,
             reject_transfer,
             send_text_message,
             get_conversation,

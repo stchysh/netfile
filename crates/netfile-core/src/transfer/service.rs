@@ -27,6 +27,7 @@ pub struct TransferService {
     cancelled: Arc<RwLock<HashSet<String>>>,
     paused: Arc<RwLock<HashSet<String>>>,
     pending_confirmations: Arc<RwLock<HashMap<String, oneshot::Sender<bool>>>>,
+    save_as_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
     require_confirmation: Arc<RwLock<bool>>,
     data_dir: PathBuf,
     download_dir: Arc<RwLock<PathBuf>>,
@@ -84,6 +85,7 @@ impl TransferService {
             cancelled: Arc::new(RwLock::new(HashSet::new())),
             paused: Arc::new(RwLock::new(HashSet::new())),
             pending_confirmations: Arc::new(RwLock::new(HashMap::new())),
+            save_as_paths: Arc::new(RwLock::new(HashMap::new())),
             require_confirmation: Arc::new(RwLock::new(false)),
             data_dir,
             download_dir: Arc::new(RwLock::new(download_dir)),
@@ -249,7 +251,11 @@ impl TransferService {
             info!("[recv/iroh/multi] user accepted: {}", file_id);
         }
 
-        let download_dir = self.download_dir.read().await.clone();
+        let download_dir = if let Some(custom_path) = self.take_save_as_path(&progress_id).await {
+            custom_path
+        } else {
+            self.download_dir.read().await.clone()
+        };
         let temp_file_path = self.data_dir.join("temp").join(format!("{}.tmp", file_id));
         let final_path = if let Some(rel) = &request.relative_path {
             download_dir.join(rel)
@@ -580,7 +586,11 @@ impl TransferService {
             info!("[recv/{}] user accepted transfer: {}", transfer_method, file_id);
         }
 
-        let download_dir = self.download_dir.read().await.clone();
+        let download_dir = if let Some(custom_path) = self.take_save_as_path(&progress_id).await {
+            custom_path
+        } else {
+            self.download_dir.read().await.clone()
+        };
         let mut receiver = FileReceiver::new(
             request.clone(),
             download_dir.clone(),
@@ -2027,10 +2037,21 @@ impl TransferService {
         }
     }
 
+    pub async fn confirm_transfer_save_as(&self, file_id: &str, save_path: PathBuf) {
+        self.save_as_paths.write().await.insert(file_id.to_string(), save_path);
+        if let Some(tx) = self.pending_confirmations.write().await.remove(file_id) {
+            let _ = tx.send(true);
+        }
+    }
+
     pub async fn reject_transfer(&self, file_id: &str) {
         if let Some(tx) = self.pending_confirmations.write().await.remove(file_id) {
             let _ = tx.send(false);
         }
+    }
+
+    async fn take_save_as_path(&self, file_id: &str) -> Option<PathBuf> {
+        self.save_as_paths.write().await.remove(file_id)
     }
 
     pub async fn update_transfer_config(
@@ -2104,6 +2125,7 @@ impl Clone for TransferService {
             cancelled: self.cancelled.clone(),
             paused: self.paused.clone(),
             pending_confirmations: self.pending_confirmations.clone(),
+            save_as_paths: self.save_as_paths.clone(),
             require_confirmation: self.require_confirmation.clone(),
             data_dir: self.data_dir.clone(),
             download_dir: self.download_dir.clone(),

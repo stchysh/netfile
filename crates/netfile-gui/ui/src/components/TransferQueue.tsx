@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import './TransferQueue.css'
 
 interface Transfer {
@@ -143,6 +144,17 @@ function TransferQueue({ transfers }: Props) {
     }
   }
 
+  const handleSaveAs = async (fileId: string) => {
+    try {
+      const selected = await open({ directory: true, multiple: false, title: '选择保存目录' })
+      if (selected) {
+        await invoke('confirm_transfer_save_as', { fileId, savePath: selected })
+      }
+    } catch (error) {
+      console.error('Failed to save as:', error)
+    }
+  }
+
   return (
     <div className="transfer-queue">
       <div className="transfer-queue-header">
@@ -206,6 +218,12 @@ function TransferQueue({ transfers }: Props) {
                       onClick={() => handleConfirm(transfer.file_id)}
                     >
                       接收
+                    </button>
+                    <button
+                      className="transfer-saveas-button"
+                      onClick={() => handleSaveAs(transfer.file_id)}
+                    >
+                      另存为
                     </button>
                     <button
                       className="transfer-reject-button"

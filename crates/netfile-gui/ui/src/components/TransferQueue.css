@@ -229,6 +229,22 @@
   background-color: #219a52;
 }
 
+.transfer-saveas-button {
+  flex: 1;
+  padding: 0.5rem;
+  border: none;
+  border-radius: 6px;
+  background-color: #3498db;
+  color: white;
+  cursor: pointer;
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+.transfer-saveas-button:hover {
+  background-color: #2980b9;
+}
+
 .transfer-reject-button {
   flex: 1;
   padding: 0.5rem;

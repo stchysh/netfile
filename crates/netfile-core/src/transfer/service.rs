@@ -1,6 +1,6 @@
 use super::file_transfer::FileReceiver;
 use super::history::{HistoryStore, TransferRecord};
-use super::share::{ShareEntry, ShareStore};
+use super::share::{compute_file_sha256, ShareEntry, ShareStore};
 use sha2::{Digest, Sha256};
 use super::progress::ProgressTracker;
 use crate::protocol::{DataStreamHeader, DownloadAck, DownloadRequest, Message, ShareListRequest, ShareListResponse, SharedFileInfo, TextAck, TextMessage, TransferComplete, TransferError, TransferRequest, TransferResponse};
@@ -848,19 +848,46 @@ impl TransferService {
                 && std::path::Path::new(&e.save_path).exists()
         });
 
-        let entry = match entry {
-            Some(e) => e,
+        // If share_store has no matching entry, fall back to history records with save_path
+        let (file_path, share_record_id) = match entry {
+            Some(e) => {
+                let record_id = e.record_id.clone();
+                (std::path::PathBuf::from(&e.save_path), Some(record_id))
+            }
             None => {
-                Self::write_msg(send, &Message::DownloadAck(DownloadAck {
-                    success: false,
-                    file_id: None,
-                    error: Some("File not found or unavailable".to_string()),
-                })).await?;
-                return Ok(());
+                let records = self.history_store.load_history().await;
+                let mut found: Option<std::path::PathBuf> = None;
+                for record in &records {
+                    let path_str = match &record.save_path {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let path = std::path::PathBuf::from(path_str);
+                    if !path.exists() {
+                        continue;
+                    }
+                    match compute_file_sha256(&path).await {
+                        Ok(hash) if hash == req.file_md5 => {
+                            found = Some(path);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                match found {
+                    Some(p) => (p, None),
+                    None => {
+                        Self::write_msg(send, &Message::DownloadAck(DownloadAck {
+                            success: false,
+                            file_id: None,
+                            error: Some("File not found or unavailable".to_string()),
+                        })).await?;
+                        return Ok(());
+                    }
+                }
             }
         };
 
-        let file_path = std::path::PathBuf::from(&entry.save_path);
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -901,7 +928,9 @@ impl TransferService {
             }
         };
 
-        let _ = self.share_store.increment_download_count(&entry.record_id).await;
+        if let Some(ref record_id) = share_record_id {
+            let _ = self.share_store.increment_download_count(record_id).await;
+        }
 
         let service = Arc::new(self.clone());
         tokio::spawn(async move {

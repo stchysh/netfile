@@ -375,6 +375,10 @@ impl DiscoveryService {
         self.public_transfer_addr.read().await.clone()
     }
 
+    pub async fn set_public_transfer_addr(&self, addr: String) {
+        *self.public_transfer_addr.write().await = Some(addr);
+    }
+
     pub async fn send_punch(&self, target_addr: SocketAddr) -> Result<()> {
         let mut msg = vec![PUNCH_REQUEST];
         if let Some(ref our_addr) = *self.public_transfer_addr.read().await {

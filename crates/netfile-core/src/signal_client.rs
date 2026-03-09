@@ -238,6 +238,10 @@ impl SignalClient {
         self.friends.read().await.clone()
     }
 
+    pub async fn get_transfer_addr(&self) -> String {
+        self.transfer_addr.read().await.clone()
+    }
+
     pub async fn get_peer_iroh_addr(&self, device_id: &str) -> Option<String> {
         let friends = self.friends.read().await;
         friends.iter()

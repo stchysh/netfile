@@ -24,6 +24,8 @@ struct Args {
     stun_port: Option<u16>,
     #[arg(long)]
     stun_public_ip: Option<String>,
+    #[arg(long, default_value_t = true)]
+    stun_enabled: bool,
     #[arg(long)]
     iroh_relay_url: Option<String>,
 }
@@ -67,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let stun_addr = if let Some(stun_port) = args.stun_port {
+    let stun_addr = if args.stun_enabled {
+        let stun_port = args.stun_port.unwrap_or(args.port + 1);
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", stun_port).parse()?;
         tokio::spawn(stun_server::run_stun_server(bind_addr));
         let public_ip = args.stun_public_ip.unwrap_or_else(|| args.host.clone());

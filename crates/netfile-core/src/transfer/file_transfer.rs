@@ -15,18 +15,16 @@ pub struct FileSender {
     file_id: String,
     relative_path: Option<String>,
     chunk_size: u32,
-    data_dir: PathBuf,
 }
 
 impl FileSender {
-    pub fn new(file_path: PathBuf, chunk_size: u32, data_dir: PathBuf) -> Self {
+    pub fn new(file_path: PathBuf, chunk_size: u32, _data_dir: PathBuf) -> Self {
         let file_id = Uuid::new_v4().to_string();
         Self {
             file_path,
             file_id,
             relative_path: None,
             chunk_size,
-            data_dir,
         }
     }
 

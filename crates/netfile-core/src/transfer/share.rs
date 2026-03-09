@@ -153,8 +153,9 @@ impl ShareStore {
         self.write_entries(&entries).await
     }
 
-    /// Set MD5 for an entry. If another entry already has the same MD5,
-    /// merge the current entry's tags into that one and remove this duplicate.
+    /// Set MD5 for an entry. Merges tags from duplicate entries but does NOT
+    /// change excluded state — each record's share status is controlled independently
+    /// by the user. Deduplication for sharing is handled in get_shared_entries.
     pub async fn update_md5(&self, record_id: &str, hash: String) -> Result<()> {
         let _guard = self.lock.lock().await;
         let mut entries = self.read_entries().await;
@@ -177,17 +178,11 @@ impl ShareStore {
                     entries[idx].tags.push(tag.clone());
                 }
             }
-            // Mark this entry as excluded rather than removing it, so the
-            // transfer history can still show its share meta section
-            if let Some(e) = entries.iter_mut().find(|e| e.record_id == record_id) {
-                e.file_md5 = Some(hash);
-                e.excluded = true;
-            }
-        } else {
-            // No duplicate — just update the hash
-            if let Some(e) = entries.iter_mut().find(|e| e.record_id == record_id) {
-                e.file_md5 = Some(hash);
-            }
+        }
+
+        // Always just set the MD5; excluded state is never changed automatically
+        if let Some(e) = entries.iter_mut().find(|e| e.record_id == record_id) {
+            e.file_md5 = Some(hash);
         }
 
         self.write_entries(&entries).await

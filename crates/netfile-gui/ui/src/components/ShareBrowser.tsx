@@ -97,11 +97,11 @@ function ShareBrowser() {
   }
 
   const handleDownload = async (device: DeviceShares, file: SharedFileInfo) => {
-    if (!file.file_md5) return
     try {
       await invoke('request_file_download', {
         transferAddr: device.transfer_addr,
-        fileMd5: file.file_md5,
+        fileMd5: file.file_md5 ?? '',
+        fileId: file.file_id || null,
       })
     } catch (error) {
       console.error('Failed to initiate download:', error)
@@ -119,11 +119,11 @@ function ShareBrowser() {
         console.error('Failed to copy local file:', error)
       }
     } else {
-      if (!file.file_md5) return
       try {
         await invoke('request_file_download_to', {
           transferAddr: device.transfer_addr,
-          fileMd5: file.file_md5,
+          fileMd5: file.file_md5 ?? '',
+          fileId: file.file_id || null,
           saveDir: dir,
         })
       } catch (error) {
@@ -165,11 +165,11 @@ function ShareBrowser() {
   }
 
   const handleBookmarkDownload = async (bm: BookmarkEntry) => {
-    if (!bm.file_md5) return
     try {
       await invoke('request_file_download', {
         transferAddr: bm.source_transfer_addr,
-        fileMd5: bm.file_md5,
+        fileMd5: bm.file_md5 ?? '',
+        fileId: bm.file_id || null,
       })
     } catch (error) {
       console.error('Failed to download bookmark:', error)
@@ -177,14 +177,14 @@ function ShareBrowser() {
   }
 
   const handleBookmarkSaveAs = async (bm: BookmarkEntry) => {
-    if (!bm.file_md5) return
     const destDir = await open({ directory: true, multiple: false })
     if (!destDir) return
     const dir = typeof destDir === 'string' ? destDir : (destDir as string[])[0]
     try {
       await invoke('request_file_download_to', {
         transferAddr: bm.source_transfer_addr,
-        fileMd5: bm.file_md5,
+        fileMd5: bm.file_md5 ?? '',
+        fileId: bm.file_id || null,
         saveDir: dir,
       })
     } catch (error) {
@@ -200,17 +200,35 @@ function ShareBrowser() {
     return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`
   }
 
+  function deduplicateByMd5(files: SharedFileInfo[]): SharedFileInfo[] {
+    const md5Map = new Map<string, SharedFileInfo>()
+    const noMd5: SharedFileInfo[] = []
+    for (const file of files) {
+      if (!file.file_md5) { noMd5.push(file); continue }
+      if (md5Map.has(file.file_md5)) {
+        const ex = md5Map.get(file.file_md5)!
+        if (!ex.file_name.split(' / ').includes(file.file_name))
+          ex.file_name = ex.file_name + ' / ' + file.file_name
+        for (const tag of file.tags)
+          if (!ex.tags.includes(tag)) ex.tags.push(tag)
+      } else {
+        md5Map.set(file.file_md5, { ...file })
+      }
+    }
+    return [...md5Map.values(), ...noMd5]
+  }
+
   const allTags = Array.from(new Set(
     devices.flatMap((d) => d.files.flatMap((f) => f.tags))
   ))
 
   const filteredDevices = devices.map((d) => ({
     ...d,
-    files: d.files.filter((f) => {
+    files: deduplicateByMd5(d.files.filter((f) => {
       const matchSearch = !searchQuery || f.file_name.toLowerCase().includes(searchQuery.toLowerCase())
       const matchTag = !selectedTag || f.tags.includes(selectedTag)
       return matchSearch && matchTag
-    }),
+    })),
   })).filter((d) => d.files.length > 0 || !searchQuery)
 
   const bookmarkIds = new Set(bookmarks.map((b) => `${b.source_instance_id}-${b.file_id}`))
@@ -287,14 +305,12 @@ function ShareBrowser() {
                   <button
                     className="share-action-btn share-download-btn"
                     onClick={() => handleBookmarkDownload(bm)}
-                    disabled={!bm.file_md5}
                   >
                     下载
                   </button>
                   <button
                     className="share-action-btn"
                     onClick={() => handleBookmarkSaveAs(bm)}
-                    disabled={!bm.file_md5}
                   >
                     另存为
                   </button>
@@ -350,7 +366,6 @@ function ShareBrowser() {
                         <button
                           className="share-action-btn share-download-btn"
                           onClick={() => handleDownload(device, file)}
-                          disabled={!file.file_md5}
                         >
                           下载
                         </button>

@@ -50,6 +50,8 @@ pub struct ShareListResponse {
 pub struct DownloadRequest {
     pub file_md5: String,
     pub requester_addr: String,
+    #[serde(default)]
+    pub file_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

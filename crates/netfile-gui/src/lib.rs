@@ -529,8 +529,9 @@ async fn request_file_download(
     state: State<'_, AppState>,
     transfer_addr: String,
     file_md5: String,
+    file_id: Option<String>,
 ) -> Result<(), String> {
-    state.transfer_service.request_download(&transfer_addr, &file_md5, None).await.map_err(|e| e.to_string())
+    state.transfer_service.request_download(&transfer_addr, &file_md5, file_id.as_deref(), None).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -538,10 +539,11 @@ async fn request_file_download_to(
     state: State<'_, AppState>,
     transfer_addr: String,
     file_md5: String,
+    file_id: Option<String>,
     save_dir: String,
 ) -> Result<(), String> {
     let dir = std::path::PathBuf::from(&save_dir);
-    state.transfer_service.request_download(&transfer_addr, &file_md5, Some(dir)).await.map_err(|e| e.to_string())
+    state.transfer_service.request_download(&transfer_addr, &file_md5, file_id.as_deref(), Some(dir)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

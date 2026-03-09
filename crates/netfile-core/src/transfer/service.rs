@@ -844,8 +844,10 @@ impl TransferService {
 
         let entries = self.share_store.get_shared_entries().await;
         let entry = entries.into_iter().find(|e| {
-            e.file_md5.as_deref() == Some(req.file_md5.as_str())
-                && std::path::Path::new(&e.save_path).exists()
+            let md5_match = !req.file_md5.is_empty()
+                && e.file_md5.as_deref() == Some(req.file_md5.as_str());
+            let id_match = req.file_id.as_deref() == Some(e.record_id.as_str());
+            (md5_match || id_match) && std::path::Path::new(&e.save_path).exists()
         });
 
         // If share_store has no matching entry, fall back to history records with save_path
@@ -2318,6 +2320,7 @@ impl TransferService {
         &self,
         transfer_addr: &str,
         file_md5: &str,
+        file_id: Option<&str>,
         save_dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<()> {
         let addr: std::net::SocketAddr = transfer_addr.parse()
@@ -2330,6 +2333,7 @@ impl TransferService {
         Self::write_msg(&mut write_half, &Message::DownloadRequest(DownloadRequest {
             file_md5: file_md5.to_string(),
             requester_addr: my_addr,
+            file_id: file_id.map(|s| s.to_string()),
         })).await?;
         match Self::read_msg(&mut read_half).await? {
             Message::DownloadAck(ack) => {

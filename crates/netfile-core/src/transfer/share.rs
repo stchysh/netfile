@@ -139,7 +139,9 @@ impl ShareStore {
     }
 
     pub async fn get_shared_entries(&self) -> Vec<ShareEntry> {
-        self.read_entries().await.into_iter().filter(|e| !e.excluded).collect()
+        self.read_entries().await.into_iter().filter(|e| {
+            !e.excluded && std::path::Path::new(&e.save_path).exists()
+        }).collect()
     }
 
     pub async fn increment_download_count(&self, record_id: &str) -> Result<()> {
@@ -205,8 +207,7 @@ impl ShareStore {
 
     /// Synchronise share entries against the current transfer history.
     ///
-    /// - Removes entries whose record_id is absent from `records` (deleted history) or
-    ///   whose file no longer exists on disk.
+    /// - Removes entries whose record_id is absent from `records` (deleted history).
     /// - Inserts new entries for completed receive records that are not yet in the store.
     pub async fn sync_from_history(
         &self,
@@ -223,13 +224,11 @@ impl ShareStore {
             .map(|r| r.id.as_str())
             .collect();
 
-        // Remove stale entries: record gone from history OR file no longer on disk
-        entries.retain(|e| {
-            if !valid_ids.contains(e.record_id.as_str()) {
-                return false;
-            }
-            std::path::Path::new(&e.save_path).exists()
-        });
+        // Remove entries whose record_id is no longer in history (e.g. history was cleared,
+        // or old records were pushed out by the 200-record limit, or UUID entries from
+        // add_local_file_to_share that were never in history). File-existence is intentionally
+        // NOT checked here so that user remarks/tags persist even if the file is moved/deleted.
+        entries.retain(|e| valid_ids.contains(e.record_id.as_str()));
 
         // Add new entries for history records not yet in the store
         let existing_ids: std::collections::HashSet<String> =

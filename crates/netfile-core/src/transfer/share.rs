@@ -116,8 +116,18 @@ impl ShareStore {
     pub async fn set_excluded(&self, record_id: &str, excluded: bool) -> Result<()> {
         let _guard = self.lock.lock().await;
         let mut entries = self.read_entries().await;
-        if let Some(e) = entries.iter_mut().find(|e| e.record_id == record_id) {
-            e.excluded = excluded;
+        let target_md5 = entries
+            .iter()
+            .find(|e| e.record_id == record_id)
+            .and_then(|e| e.file_md5.clone());
+        for entry in &mut entries {
+            if entry.record_id == record_id {
+                entry.excluded = excluded;
+            } else if let Some(ref md5) = target_md5 {
+                if entry.file_md5.as_deref() == Some(md5.as_str()) {
+                    entry.excluded = excluded;
+                }
+            }
         }
         self.write_entries(&entries).await
     }

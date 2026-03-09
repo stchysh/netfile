@@ -200,7 +200,14 @@ function TransferHistory() {
       await invoke('set_share_excluded', { recordId, excluded: !current })
       setShareEntries((prev) => {
         if (!prev[recordId]) return prev
-        return { ...prev, [recordId]: { ...prev[recordId], excluded: !current } }
+        const targetMd5 = prev[recordId].file_md5
+        const next = { ...prev }
+        for (const id of Object.keys(next)) {
+          if (id === recordId || (targetMd5 && next[id].file_md5 === targetMd5)) {
+            next[id] = { ...next[id], excluded: !current }
+          }
+        }
+        return next
       })
     } catch (error) {
       console.error('Failed to toggle share excluded:', error)

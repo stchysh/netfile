@@ -1063,7 +1063,9 @@ pub fn run() {
                     tokio::spawn(async move {
                         if let Ok(()) = sc_clone.connect().await {
                             let transfer_addr = sc_clone.get_transfer_addr().await;
-                            if !transfer_addr.is_empty() && !transfer_addr.starts_with("0.0.0.0") {
+                            if !transfer_addr.is_empty() && !transfer_addr.starts_with("0.0.0.0")
+                                && discovery_clone.get_my_public_transfer_addr().await.is_none()
+                            {
                                 discovery_clone.set_public_transfer_addr(transfer_addr).await;
                             }
                             let handle = spawn_iroh_addr_watcher(sc_clone.clone(), iroh_manager_clone);

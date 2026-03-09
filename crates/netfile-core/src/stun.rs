@@ -12,11 +12,20 @@ impl StunClient {
     pub fn new() -> Self {
         Self {
             stun_servers: vec![
-                "stun.miwifi.com:3478".to_string(),
-                "stun.cloudflare.com:3478".to_string(),
-                "stun.qq.com:3478".to_string(),
-                "stun.syncthing.net:3478".to_string(),
-                "stun.stunprotocol.org:3478".to_string(),
+                // "stun.miwifi.com:3478".to_string(),
+                // "stun.cloudflare.com:3478".to_string(),
+                // "stun.qq.com:3478".to_string(),
+                // "stun.syncthing.net:3478".to_string(),
+                // "stun.stunprotocol.org:3478".to_string(),
+				"global.stun.twilio.com:3478".to_string(),
+				"stun.cloudflare.com:3478".to_string(),
+				"stun.l.google.com:19302".to_string(),
+				"stun1.l.google.com:19302".to_string(),
+				"stun2.l.google.com:19302".to_string(),
+				"stun4.l.google.com:19302".to_string(),
+				"stun.freeswitch.org:3478".to_string(),
+				"stun.voipstunt.com:3478".to_string(),
+				"stun.voipbuster.com:3478".to_string(),
             ],
         }
     }
@@ -28,16 +37,24 @@ impl StunClient {
     }
 
     pub async fn get_public_address(&self) -> Result<SocketAddr> {
-        for server in &self.stun_servers {
-            let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-            match Self::query_with_socket(&socket, server).await {
-                Ok(addr) => {
-                    info!("Got public address from {}: {}", server, addr);
+        for chunk in self.stun_servers.chunks(3) {
+            let mut set = tokio::task::JoinSet::new();
+            for server in chunk {
+                let server = server.clone();
+                set.spawn(async move {
+                    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+                    tokio::time::timeout(
+                        tokio::time::Duration::from_secs(2),
+                        Self::query_with_socket(&socket, &server),
+                    )
+                    .await
+                    .map_err(|_| anyhow::anyhow!("timeout: {}", server))?
+                });
+            }
+            while let Some(res) = set.join_next().await {
+                if let Ok(Ok(addr)) = res {
+                    info!("Got public address: {}", addr);
                     return Ok(addr);
-                }
-                Err(e) => {
-                    warn!("Failed to query STUN server {}: {}", server, e);
-                    continue;
                 }
             }
         }

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import DeviceModal from './DeviceModal'
 import InviteDialog from './InviteDialog'
 import './DeviceList.css'
@@ -22,6 +23,11 @@ interface FriendInfo {
   instance_name: string
   online: boolean
   transfer_addr: string | null
+}
+
+interface DeviceAlias {
+  alias: string
+  favorite: boolean
 }
 
 interface Props {
@@ -66,6 +72,9 @@ function DeviceList({ devices }: Props) {
   const [activeChatDeviceId, setActiveChatDeviceId] = useState<string | null>(null)
   const [signalFriends, setSignalFriends] = useState<FriendInfo[]>([])
   const [showInviteDialog, setShowInviteDialog] = useState(false)
+  const [aliases, setAliases] = useState<Record<string, DeviceAlias>>({})
+  const [editingAliasId, setEditingAliasId] = useState<string | null>(null)
+  const [aliasInput, setAliasInput] = useState('')
 
   const msgCountsRef = useRef<Record<string, number>>({})
   const lastReadRef = useRef<Record<string, number>>(loadLastReadCounts())
@@ -124,6 +133,56 @@ function DeviceList({ devices }: Props) {
     const interval = setInterval(pollFriends, 2000)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    const fetchAliases = async () => {
+      try {
+        const result = await invoke<Record<string, DeviceAlias>>('get_device_aliases')
+        setAliases(prev => JSON.stringify(prev) === JSON.stringify(result) ? prev : result)
+      } catch { /* ignore */ }
+    }
+    fetchAliases()
+    const interval = setInterval(fetchAliases, 5000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const displayName = (deviceId: string, fallback: string) => {
+    const a = aliases[deviceId]
+    return a?.alias ? a.alias : fallback
+  }
+
+  const isFavorite = (deviceId: string) => aliases[deviceId]?.favorite ?? false
+
+  const saveAlias = async (deviceId: string, alias: string) => {
+    try {
+      await invoke('set_device_alias', { deviceId, alias })
+      setAliases(prev => ({ ...prev, [deviceId]: { ...prev[deviceId], alias } }))
+    } catch { /* ignore */ }
+    setEditingAliasId(null)
+  }
+
+  const toggleFavorite = async (deviceId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const current = aliases[deviceId]?.favorite ?? false
+    try {
+      await invoke('set_device_favorite', { deviceId, favorite: !current })
+      setAliases(prev => ({ ...prev, [deviceId]: { ...prev[deviceId] ?? { alias: '' }, favorite: !current } }))
+    } catch { /* ignore */ }
+  }
+
+  const handleBroadcast = async () => {
+    try {
+      const selected = await open({ multiple: false, directory: false })
+      if (!selected) return
+      const filePath = selected as string
+      const count = await invoke<number>('send_file_broadcast', { filePath })
+      if (count === 0) {
+        alert('没有可广播的局域网设备')
+      }
+    } catch (e) {
+      alert(`广播失败: ${e}`)
+    }
+  }
 
   const markRead = (deviceId: string) => {
     if (!deviceId) return
@@ -216,6 +275,18 @@ function DeviceList({ devices }: Props) {
 
   const allDevices = devices.length === 0 && manualDevices.length === 0 && signalFriends.length === 0
 
+  const sortedDevices = [...devices].sort((a, b) => {
+    const af = !a.is_self && a.device_id ? (isFavorite(a.device_id) ? -1 : 0) : 0
+    const bf = !b.is_self && b.device_id ? (isFavorite(b.device_id) ? -1 : 0) : 0
+    return af - bf
+  })
+
+  const renderAliasEditor = (deviceId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setEditingAliasId(deviceId)
+    setAliasInput(aliases[deviceId]?.alias ?? '')
+  }
+
   return (
     <>
       <div className="device-list">
@@ -230,23 +301,53 @@ function DeviceList({ devices }: Props) {
             </div>
           ) : (
             <>
-              {devices.map((device) => {
+              {sortedDevices.map((device) => {
                 const hasUnread = !device.is_self && device.device_id
                   && unreadIds.has(device.device_id)
                   && activeChatDeviceId !== device.device_id
+                const fav = !device.is_self && device.device_id ? isFavorite(device.device_id) : false
+                const isEditing = editingAliasId === device.device_id
                 return (
                   <div key={device.instance_id} className="device-item" onClick={() => setSelectedDevice(device)}>
                     <div className="device-info">
                       <div className="device-status online"></div>
                       <div className="device-details">
-                        <div className="device-name">
-                          {device.instance_name}
-                          <span className={device.is_self ? 'self-badge' : 'instance-name'}>
-                            {' '}({device.is_self ? '本机' : device.ip})
-                          </span>
-                        </div>
+                        {isEditing ? (
+                          <div className="alias-edit-row" onClick={e => e.stopPropagation()}>
+                            <input
+                              className="alias-input"
+                              value={aliasInput}
+                              onChange={e => setAliasInput(e.target.value)}
+                              onKeyDown={e => { if (e.key === 'Enter') saveAlias(device.device_id, aliasInput); if (e.key === 'Escape') setEditingAliasId(null) }}
+                              autoFocus
+                            />
+                            <button className="alias-save-btn" onClick={() => saveAlias(device.device_id, aliasInput)}>确认</button>
+                            <button className="alias-cancel-btn" onClick={() => setEditingAliasId(null)}>取消</button>
+                          </div>
+                        ) : (
+                          <div className="device-name">
+                            {displayName(device.device_id, device.instance_name)}
+                            <span className={device.is_self ? 'self-badge' : 'instance-name'}>
+                              {' '}({device.is_self ? '本机' : device.ip})
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
+                    {!device.is_self && device.device_id && (
+                      <>
+                        <button
+                          className={`fav-btn ${fav ? 'fav-btn-active' : ''}`}
+                          onClick={e => toggleFavorite(device.device_id, e)}
+                          title={fav ? '取消收藏' : '收藏'}
+                        >★</button>
+                        <button
+                          className="alias-btn"
+                          onClick={e => renderAliasEditor(device.device_id, e)}
+                          title="设置别名"
+                        >✎</button>
+                      </>
+                    )}
                     {hasUnread && <div className="unread-dot"></div>}
                   </div>
                 )
@@ -254,22 +355,48 @@ function DeviceList({ devices }: Props) {
               {signalFriends.length > 0 && (
                 <div className="friends-section">
                   <div className="friends-label">网络好友</div>
-                  {signalFriends.filter(f => f.online).map(f => {
+                  {signalFriends.filter(f => f.online).sort((a, b) => (isFavorite(b.device_id) ? 1 : 0) - (isFavorite(a.device_id) ? 1 : 0)).map(f => {
                     const hasUnread = unreadIds.has(f.device_id) && activeChatDeviceId !== f.device_id
                     const addr = f.transfer_addr ?? ''
                     const colonIdx = addr.lastIndexOf(':')
                     const ip = colonIdx >= 0 ? addr.slice(0, colonIdx) : (addr || '未知')
+                    const fav = isFavorite(f.device_id)
+                    const isEditing = editingAliasId === f.device_id
                     return (
                       <div className="device-item" key={f.device_id} onClick={() => handleOpenFriend(f)}>
                         <div className="device-info">
                           <div className="device-status online"></div>
                           <div className="device-details">
-                            <div className="device-name">
-                              {f.instance_name}
-                              <span className="instance-name"> ({ip})</span>
-                            </div>
+                            {isEditing ? (
+                              <div className="alias-edit-row" onClick={e => e.stopPropagation()}>
+                                <input
+                                  className="alias-input"
+                                  value={aliasInput}
+                                  onChange={e => setAliasInput(e.target.value)}
+                                  onKeyDown={e => { if (e.key === 'Enter') saveAlias(f.device_id, aliasInput); if (e.key === 'Escape') setEditingAliasId(null) }}
+                                  autoFocus
+                                />
+                                <button className="alias-save-btn" onClick={() => saveAlias(f.device_id, aliasInput)}>确认</button>
+                                <button className="alias-cancel-btn" onClick={() => setEditingAliasId(null)}>取消</button>
+                              </div>
+                            ) : (
+                              <div className="device-name">
+                                {displayName(f.device_id, f.instance_name)}
+                                <span className="instance-name"> ({ip})</span>
+                              </div>
+                            )}
                           </div>
                         </div>
+                        <button
+                          className={`fav-btn ${fav ? 'fav-btn-active' : ''}`}
+                          onClick={e => toggleFavorite(f.device_id, e)}
+                          title={fav ? '取消收藏' : '收藏'}
+                        >★</button>
+                        <button
+                          className="alias-btn"
+                          onClick={e => { e.stopPropagation(); setEditingAliasId(f.device_id); setAliasInput(aliases[f.device_id]?.alias ?? '') }}
+                          title="设置别名"
+                        >✎</button>
                         {hasUnread && <div className="unread-dot"></div>}
                       </div>
                     )
@@ -280,7 +407,7 @@ function DeviceList({ devices }: Props) {
                         <div className="device-status offline"></div>
                         <div className="device-details">
                           <div className="device-name">
-                            {f.instance_name}
+                            {displayName(f.device_id, f.instance_name)}
                             <span className="offline-badge">离线</span>
                           </div>
                         </div>
@@ -334,6 +461,9 @@ function DeviceList({ devices }: Props) {
               </button>
               <button className="invite-btn" onClick={() => setShowInviteDialog(true)}>
                 邀请好友
+              </button>
+              <button className="broadcast-btn" onClick={handleBroadcast} title="发送文件给所有局域网设备">
+                广播
               </button>
             </div>
           )}

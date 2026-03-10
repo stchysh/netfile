@@ -247,7 +247,7 @@ function Settings({ onClose }: Props) {
                 <input
                   type="text"
                   value={config.network.signal_server_addr}
-                  placeholder="host:37200"
+                  placeholder="host:37200 或 host1:37200,host2:37200"
                   onChange={(e) =>
                     setConfig({
                       ...config,
@@ -521,6 +521,25 @@ function Settings({ onClose }: Props) {
                 <span>启用 TLS 加密</span>
               </label>
             </div>
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <h3>诊断</h3>
+          <div className="form-group">
+            <button
+              className="export-diag-button"
+              onClick={async () => {
+                try {
+                  const path = await invoke<string>('export_diagnostics')
+                  alert(`诊断日志已导出: ${path}`)
+                } catch (e) {
+                  alert(`导出失败: ${e}`)
+                }
+              }}
+            >
+              导出诊断日志
+            </button>
           </div>
         </div>
 

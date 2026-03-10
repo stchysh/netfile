@@ -289,3 +289,90 @@
   background-color: #f8f9fa;
   color: #2c3e50;
 }
+
+.broadcast-btn {
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px dashed #b2bec3;
+  border-radius: 6px;
+  background-color: transparent;
+  color: #7f8c8d;
+  cursor: pointer;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.broadcast-btn:hover {
+  background-color: #f8f9fa;
+  color: #2c3e50;
+}
+
+.fav-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #ccc;
+  font-size: 1rem;
+  padding: 0 0.2rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.fav-btn-active {
+  color: #f39c12;
+}
+
+.fav-btn:hover {
+  color: #f39c12;
+}
+
+.alias-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #aaa;
+  font-size: 0.875rem;
+  padding: 0 0.2rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.alias-btn:hover {
+  color: #2c3e50;
+}
+
+.alias-edit-row {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.alias-input {
+  flex: 1;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  min-width: 0;
+}
+
+.alias-save-btn {
+  padding: 0.2rem 0.4rem;
+  background-color: #27ae60;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.alias-cancel-btn {
+  padding: 0.2rem 0.4rem;
+  background-color: #dfe6e9;
+  color: #2d3436;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}

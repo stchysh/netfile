@@ -5,6 +5,7 @@ use netfile_core::{
     TransferRecord, TransferService,
 };
 use netfile_core::protocol::ShareListResponse;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -12,6 +13,39 @@ use std::sync::Arc;
 use tauri::{Manager, State};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeviceAlias {
+    pub alias: String,
+    pub favorite: bool,
+}
+
+fn aliases_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".netfile")
+        .join("device_aliases.json")
+}
+
+fn load_aliases() -> HashMap<String, DeviceAlias> {
+    let path = aliases_path();
+    if !path.exists() {
+        return HashMap::new();
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_aliases(aliases: &HashMap<String, DeviceAlias>) -> anyhow::Result<()> {
+    let path = aliases_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string(aliases)?)?;
+    Ok(())
+}
 
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
@@ -750,14 +784,22 @@ async fn connect_signal_server(
     let config = state.config.read().await.clone();
     let message_store = state.message_store.clone();
     let transfer_port = state.transfer_service.local_port();
-    let sc = SignalClient::new(
-        config.instance.instance_id.clone(),
-        config.instance.instance_name.clone(),
-        format!("0.0.0.0:{}", transfer_port),
-        server_addr,
-        message_store,
-    );
-    sc.connect().await.map_err(|e| e.to_string())?;
+    let addrs: Vec<&str> = server_addr.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let mut connected_sc = None;
+    for addr in addrs {
+        let sc = SignalClient::new(
+            config.instance.instance_id.clone(),
+            config.instance.instance_name.clone(),
+            format!("0.0.0.0:{}", transfer_port),
+            addr.to_string(),
+            message_store.clone(),
+        );
+        if sc.connect().await.is_ok() {
+            connected_sc = Some(sc);
+            break;
+        }
+    }
+    let sc = connected_sc.ok_or_else(|| "所有信令服务器连接失败".to_string())?;
     let iroh_mgr = state.iroh_manager.clone();
     let sc_clone = sc.clone();
     let mut guard = state.signal_client.write().await;
@@ -868,6 +910,91 @@ fn spawn_iroh_addr_watcher(sc: Arc<SignalClient>, iroh_manager: Arc<IrohManager>
     })
 }
 
+#[tauri::command]
+async fn export_diagnostics() -> Result<String, String> {
+    use std::io::Write;
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".netfile")
+        .join("logs");
+    let out_path = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".netfile")
+        .join("diagnostics.zip");
+
+    let file = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    if log_dir.exists() {
+        let entries = std::fs::read_dir(&log_dir).map_err(|e| e.to_string())?;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                zip.start_file(name, options).map_err(|e| e.to_string())?;
+                let data = std::fs::read(&path).map_err(|e| e.to_string())?;
+                zip.write_all(&data).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn get_device_aliases() -> Result<HashMap<String, DeviceAlias>, String> {
+    Ok(load_aliases())
+}
+
+#[tauri::command]
+async fn set_device_alias(device_id: String, alias: String) -> Result<(), String> {
+    let mut aliases = load_aliases();
+    let entry = aliases.entry(device_id).or_default();
+    entry.alias = alias;
+    save_aliases(&aliases).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_device_favorite(device_id: String, favorite: bool) -> Result<(), String> {
+    let mut aliases = load_aliases();
+    let entry = aliases.entry(device_id).or_default();
+    entry.favorite = favorite;
+    save_aliases(&aliases).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn send_file_broadcast(
+    state: State<'_, AppState>,
+    file_path: String,
+    enable_compression: Option<bool>,
+) -> Result<usize, String> {
+    let path = PathBuf::from(&file_path);
+    if !path.exists() {
+        return Err(format!("文件不存在: {}", file_path));
+    }
+    let compression = enable_compression.unwrap_or(false);
+    let devices = state.discovery_service.get_devices().await;
+    let targets: Vec<SocketAddr> = devices
+        .into_iter()
+        .filter(|d| !d.is_self)
+        .filter_map(|d| format!("{}:{}", d.ip, d.port).parse().ok())
+        .filter(|addr| is_lan_addr(*addr))
+        .collect();
+    let count = targets.len();
+    let service = state.transfer_service.clone();
+    for candidate in targets {
+        let svc = service.clone();
+        let p = path.clone();
+        let plog = p.display().to_string();
+        tokio::spawn(async move {
+            try_direct_transfer(&svc, &p, candidate, compression, &plog).await;
+        });
+    }
+    Ok(count)
+}
+
 fn cleanup_old_logs(log_dir: &std::path::Path, max_files: usize) {
     let Ok(entries) = std::fs::read_dir(log_dir) else { return };
     let mut files: Vec<_> = entries
@@ -960,6 +1087,11 @@ pub fn run() {
             request_file_download,
             request_file_download_to,
             copy_local_file,
+            export_diagnostics,
+            get_device_aliases,
+            set_device_alias,
+            set_device_favorite,
+            send_file_broadcast,
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {
@@ -1063,29 +1195,37 @@ pub fn run() {
                     Arc::new(tokio::sync::Mutex::new(None));
 
                 if !config.network.signal_server_addr.is_empty() {
-                    let sc = SignalClient::new(
-                        config.instance.instance_id.clone(),
-                        config.instance.instance_name.clone(),
-                        format!("0.0.0.0:{}", transfer_port),
-                        config.network.signal_server_addr.clone(),
-                        message_store.clone(),
-                    );
-                    let sc_clone = sc.clone();
+                    let addrs_raw = config.network.signal_server_addr.clone();
+                    let device_id = config.instance.instance_id.clone();
+                    let instance_name = config.instance.instance_name.clone();
+                    let transfer_addr_str = format!("0.0.0.0:{}", transfer_port);
+                    let msg_store = message_store.clone();
                     let iroh_manager_clone = iroh_manager.clone();
                     let signal_client_clone = signal_client.clone();
                     let iroh_watcher_clone = iroh_watcher.clone();
                     let discovery_clone = discovery_service.clone();
                     tokio::spawn(async move {
-                        if let Ok(()) = sc_clone.connect().await {
-                            let transfer_addr = sc_clone.get_transfer_addr().await;
-                            if !transfer_addr.is_empty() && !transfer_addr.starts_with("0.0.0.0")
-                                && discovery_clone.get_my_public_transfer_addr().await.is_none()
-                            {
-                                discovery_clone.set_public_transfer_addr(transfer_addr).await;
+                        let addrs: Vec<&str> = addrs_raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                        for addr in addrs {
+                            let sc = SignalClient::new(
+                                device_id.clone(),
+                                instance_name.clone(),
+                                transfer_addr_str.clone(),
+                                addr.to_string(),
+                                msg_store.clone(),
+                            );
+                            if let Ok(()) = sc.connect().await {
+                                let t_addr = sc.get_transfer_addr().await;
+                                if !t_addr.is_empty() && !t_addr.starts_with("0.0.0.0")
+                                    && discovery_clone.get_my_public_transfer_addr().await.is_none()
+                                {
+                                    discovery_clone.set_public_transfer_addr(t_addr).await;
+                                }
+                                let handle = spawn_iroh_addr_watcher(sc.clone(), iroh_manager_clone);
+                                *iroh_watcher_clone.lock().await = Some(handle);
+                                *signal_client_clone.write().await = Some(sc);
+                                break;
                             }
-                            let handle = spawn_iroh_addr_watcher(sc_clone.clone(), iroh_manager_clone);
-                            *iroh_watcher_clone.lock().await = Some(handle);
-                            *signal_client_clone.write().await = Some(sc_clone);
                         }
                     });
                 }
@@ -1139,4 +1279,87 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+pub fn run_cli() {
+    tokio::runtime::Runtime::new()
+        .expect("Failed to create tokio runtime")
+        .block_on(cli_main())
+        .unwrap_or_else(|e| eprintln!("CLI error: {}", e));
+}
+
+async fn cli_main() -> anyhow::Result<()> {
+    println!("NetFile CLI Mode");
+    let config_path = Config::default_path();
+    let config = if config_path.exists() {
+        Config::load(&config_path).unwrap_or_default()
+    } else {
+        Config::default()
+    };
+    println!("Instance: {}", config.instance.instance_name);
+    println!("Device: {}", config.instance.device_name);
+    println!("Press Ctrl+C to exit");
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+
+pub fn run_tui() {
+    tokio::runtime::Runtime::new()
+        .expect("Failed to create tokio runtime")
+        .block_on(tui_main())
+        .unwrap_or_else(|e| eprintln!("TUI error: {}", e));
+}
+
+async fn tui_main() -> anyhow::Result<()> {
+    use crossterm::{
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+    use ratatui::{
+        backend::CrosstermBackend,
+        widgets::{Block, Borders, Paragraph},
+        Terminal,
+    };
+    use std::io;
+
+    let config_path = Config::default_path();
+    let config = if config_path.exists() {
+        Config::load(&config_path).unwrap_or_default()
+    } else {
+        Config::default()
+    };
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    loop {
+        let instance_name = config.instance.instance_name.clone();
+        let device_name = config.instance.device_name.clone();
+        terminal.draw(move |f| {
+            let text = format!(
+                "NetFile TUI\n\nInstance: {}\nDevice: {}\n\nPress 'q' to quit",
+                instance_name, device_name
+            );
+            let block = Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL).title("NetFile"));
+            f.render_widget(block, f.area());
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('q') {
+                    break;
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+    Ok(())
 }

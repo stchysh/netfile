@@ -30,8 +30,15 @@ interface SelectedFile {
 function FileSender({ device, onClose, embedded }: Props) {
   const [selectedFiles, setSelectedFiles] = useState<SelectedFile[]>([])
   const [enableCompression, setEnableCompression] = useState(false)
+  const [configCompressionEnabled, setConfigCompressionEnabled] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+
+  useEffect(() => {
+    invoke<{ transfer: { enable_compression: boolean } }>('get_config')
+      .then((cfg) => setConfigCompressionEnabled(cfg?.transfer?.enable_compression ?? false))
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     const unlisten = listen<{ paths: string[]; position: unknown } | string[]>(
@@ -112,19 +119,20 @@ function FileSender({ device, onClose, embedded }: Props) {
     const targetAddr = `${device.ip}:${device.port}`
     const publicAddr = device.public_transfer_addr
     const peerDiscoveryAddr = device.discovery_port ? `${device.ip}:${device.discovery_port}` : undefined
+    const compression = configCompressionEnabled || enableCompression
     console.info('[punch-flow][ui] send_file invoked', {
       targetAddr,
       publicAddr,
       peerDiscoveryAddr,
       peerDeviceId: device.device_id || null,
-      compression: enableCompression,
+      compression,
       files: selectedFiles.map((f) => f.path),
     })
     for (const file of selectedFiles) {
       invoke('send_file', {
         targetAddr,
         filePath: file.path,
-        enableCompression,
+        enableCompression: compression,
         publicAddr,
         peerDiscoveryAddr,
         peerDeviceId: device.device_id || null,
@@ -220,16 +228,18 @@ function FileSender({ device, onClose, embedded }: Props) {
             </button>
           </div>
 
-          <div className="options">
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={enableCompression}
-                onChange={(e) => setEnableCompression(e.target.checked)}
-              />
-              <span>启用压缩</span>
-            </label>
-          </div>
+          {!configCompressionEnabled && (
+            <div className="options">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={enableCompression}
+                  onChange={(e) => setEnableCompression(e.target.checked)}
+                />
+                <span>启用压缩</span>
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="modal-footer">

@@ -1,1 +1,7 @@
 /target
+node_modules/
+crates/netfile-gui/ui/dist/
+crates/netfile-gui/gen/
+crates/netfile-gui/capabilities/
+*.log
+.env

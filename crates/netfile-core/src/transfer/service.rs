@@ -166,6 +166,7 @@ impl TransferService {
                 // file_id -> Vec of senders (one per data stream)
                 let data_routes: Arc<RwLock<HashMap<String, Vec<mpsc::Sender<(u32, bool, Vec<u8>)>>>>> =
                     Arc::new(RwLock::new(HashMap::new()));
+                let conn_type = service.iroh_manager.get_conn_type(&conn);
                 loop {
                     let (send, recv) = match conn.accept_bi().await {
                         Ok(s) => s,
@@ -174,7 +175,7 @@ impl TransferService {
                     let svc = service.clone();
                     let routes = data_routes.clone();
                     tokio::spawn(async move {
-                        svc.handle_iroh_stream(send, recv, routes).await;
+                        svc.handle_iroh_stream(send, recv, routes, conn_type).await;
                     });
                 }
             });
@@ -186,6 +187,7 @@ impl TransferService {
         mut send: S,
         mut recv: R,
         data_routes: Arc<RwLock<HashMap<String, Vec<mpsc::Sender<(u32, bool, Vec<u8>)>>>>>,
+        conn_type: &'static str,
     ) where
         S: AsyncWrite + Unpin + Send + 'static,
         R: AsyncRead + Unpin + Send + 'static,
@@ -198,10 +200,10 @@ impl TransferService {
             Message::TransferRequest(req) => {
                 let stream_count = req.stream_count.unwrap_or(1);
                 if stream_count > 1 {
-                    if let Err(e) = self.handle_iroh_multi_control(&mut send, &mut recv, req, data_routes).await {
+                    if let Err(e) = self.handle_iroh_multi_control(&mut send, &mut recv, req, data_routes, conn_type).await {
                         warn!("[recv/iroh/multi] control error: {}", e);
                     }
-                } else if let Err(e) = self.handle_transfer_request(&mut send, &mut recv, req, "iroh").await {
+                } else if let Err(e) = self.handle_transfer_request(&mut send, &mut recv, req, conn_type).await {
                     debug!("[recv/iroh] transfer error: {}", e);
                 }
             }
@@ -236,6 +238,7 @@ impl TransferService {
         recv: &mut R,
         request: TransferRequest,
         data_routes: Arc<RwLock<HashMap<String, Vec<mpsc::Sender<(u32, bool, Vec<u8>)>>>>>,
+        conn_type: &'static str,
     ) -> Result<()>
     where
         S: AsyncWrite + Unpin,
@@ -257,7 +260,7 @@ impl TransferService {
             self.progress_tracker
                 .register_pending_confirm(progress_id.clone(), request.file_name.clone(), file_size)
                 .await;
-            self.progress_tracker.set_transfer_method(&progress_id, "iroh").await;
+            self.progress_tracker.set_transfer_method(&progress_id, conn_type).await;
             let (tx, rx) = oneshot::channel();
             self.pending_confirmations.write().await.insert(progress_id.clone(), tx);
             let accepted = rx.await.unwrap_or(false);
@@ -309,7 +312,7 @@ impl TransferService {
         self.progress_tracker
             .start_transfer(progress_id.clone(), request.file_name.clone(), file_size, total_chunks, "receive".to_string())
             .await;
-        self.progress_tracker.set_transfer_method(&progress_id, "iroh").await;
+        self.progress_tracker.set_transfer_method(&progress_id, conn_type).await;
         self.progress_tracker.set_active(&progress_id).await;
 
         if let Err(e) = Self::write_msg(send, &Message::TransferResponse(TransferResponse {
@@ -1186,6 +1189,11 @@ impl TransferService {
 
         self.progress_tracker.set_active(&folder_id).await;
 
+        if let Ok(conn) = self.iroh_get_or_connect(endpoint_addr.clone()).await {
+            let conn_type = self.iroh_manager.get_conn_type(&conn);
+            self.progress_tracker.set_transfer_method(&folder_id, conn_type).await;
+        }
+
         for entry in &file_entries {
             if self.cancelled.read().await.contains(&folder_id) {
                 info!("[send/iroh/folder] cancelled: {}", folder_id);
@@ -1911,6 +1919,8 @@ impl TransferService {
                 return Err(e);
             }
         };
+        let conn_type = self.iroh_manager.get_conn_type(&conn);
+        self.progress_tracker.set_transfer_method(&file_id, conn_type).await;
 
         let (mut send, mut recv) = match conn.open_bi().await {
             Ok(s) => {

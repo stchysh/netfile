@@ -23,6 +23,8 @@ interface Transfer {
 
 function methodLabel(method?: string): string {
   if (method === 'lan') return 'LAN'
+  if (method === 'iroh-p2p') return 'P2P'
+  if (method === 'iroh-relay') return 'Relay'
   if (method === 'iroh') return 'NAT'
   return ''
 }

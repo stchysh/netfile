@@ -94,4 +94,16 @@ impl IrohManager {
     pub fn endpoint_ref(&self) -> &Endpoint {
         &self.endpoint
     }
+
+    pub fn get_conn_type(&self, conn: &iroh::endpoint::Connection) -> &'static str {
+        use iroh::Watcher;
+        let paths = conn.to_info().paths().get();
+        let selected = paths.iter().find(|p| p.is_selected());
+        match selected {
+            Some(p) => if p.is_relay() { "iroh-relay" } else { "iroh-p2p" },
+            None => if paths.iter().any(|p| !p.is_relay()) { "iroh-p2p" }
+                    else if paths.iter().any(|p| p.is_relay()) { "iroh-relay" }
+                    else { "iroh" },
+        }
+    }
 }

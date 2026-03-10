@@ -111,10 +111,13 @@ pub fn encode_s2c(msg: &S2cMsg) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-pub async fn read_c2s(stream: &mut TcpStream) -> Result<C2sMsg> {
+pub async fn read_c2s(stream: &mut TcpStream, max_bytes: usize) -> Result<C2sMsg> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > max_bytes {
+        return Err(anyhow::anyhow!("message too large: {} bytes (limit {})", len, max_bytes));
+    }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     let msg = serde_json::from_slice(&buf)?;

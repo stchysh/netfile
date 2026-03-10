@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
@@ -8,6 +10,24 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::protocol::{read_c2s, write_s2c, C2sMsg, FriendInfo, OfflineMsg, S2cMsg};
+
+pub struct RateLimitConfig {
+    pub max_connections: usize,
+    pub max_connections_per_ip: usize,
+    pub rate_limit_msgs_per_sec: u32,
+    pub max_msg_bytes: usize,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 500,
+            max_connections_per_ip: 5,
+            rate_limit_msgs_per_sec: 20,
+            max_msg_bytes: 65536,
+        }
+    }
+}
 
 struct OnlineEntry {
     instance_name: String,
@@ -29,6 +49,9 @@ pub struct ServerState {
     pub relay_addr: Option<String>,
     pub stun_addr: Option<String>,
     pub iroh_relay_url: Option<String>,
+    pub rate_limit: RateLimitConfig,
+    total_connections: AtomicUsize,
+    connections_per_ip: RwLock<HashMap<IpAddr, usize>>,
 }
 
 impl ServerState {
@@ -41,6 +64,9 @@ impl ServerState {
             relay_addr: None,
             stun_addr: None,
             iroh_relay_url: None,
+            rate_limit: RateLimitConfig::default(),
+            total_connections: AtomicUsize::new(0),
+            connections_per_ip: RwLock::new(HashMap::new()),
         })
     }
 
@@ -53,10 +79,13 @@ impl ServerState {
             relay_addr: Some(relay_addr),
             stun_addr: None,
             iroh_relay_url: None,
+            rate_limit: RateLimitConfig::default(),
+            total_connections: AtomicUsize::new(0),
+            connections_per_ip: RwLock::new(HashMap::new()),
         })
     }
 
-    pub fn new_full(relay_addr: Option<String>, stun_addr: Option<String>, iroh_relay_url: Option<String>) -> Arc<Self> {
+    pub fn new_full(relay_addr: Option<String>, stun_addr: Option<String>, iroh_relay_url: Option<String>, rate_limit: RateLimitConfig) -> Arc<Self> {
         Arc::new(Self {
             online: RwLock::new(HashMap::new()),
             friends: RwLock::new(HashMap::new()),
@@ -65,6 +94,9 @@ impl ServerState {
             relay_addr,
             stun_addr,
             iroh_relay_url,
+            rate_limit,
+            total_connections: AtomicUsize::new(0),
+            connections_per_ip: RwLock::new(HashMap::new()),
         })
     }
 
@@ -79,6 +111,17 @@ impl ServerState {
     }
 }
 
+async fn decrement_connection_counts(state: &Arc<ServerState>, peer_ip: IpAddr) {
+    state.total_connections.fetch_sub(1, Ordering::Relaxed);
+    let mut ip_map = state.connections_per_ip.write().await;
+    if let Some(count) = ip_map.get_mut(&peer_ip) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            ip_map.remove(&peer_ip);
+        }
+    }
+}
+
 pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
     let peer_addr = match stream.peer_addr() {
         Ok(addr) => addr,
@@ -87,18 +130,40 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
             return;
         }
     };
-    let observed_ip = peer_addr.ip().to_string();
+    let peer_ip = peer_addr.ip();
+    let observed_ip = peer_ip.to_string();
 
-    let (device_id, instance_name, transfer_addr, _nat_type) = match read_c2s(&mut stream).await {
+    let prev_total = state.total_connections.fetch_add(1, Ordering::Relaxed);
+    if prev_total >= state.rate_limit.max_connections {
+        state.total_connections.fetch_sub(1, Ordering::Relaxed);
+        warn!("Max connections ({}) reached, rejecting {}", state.rate_limit.max_connections, peer_addr);
+        return;
+    }
+
+    {
+        let mut ip_map = state.connections_per_ip.write().await;
+        let count = ip_map.entry(peer_ip).or_insert(0);
+        if *count >= state.rate_limit.max_connections_per_ip {
+            drop(ip_map);
+            state.total_connections.fetch_sub(1, Ordering::Relaxed);
+            warn!("Per-IP connection limit ({}) reached for {}", state.rate_limit.max_connections_per_ip, peer_ip);
+            return;
+        }
+        *count += 1;
+    }
+
+    let (device_id, instance_name, transfer_addr, _nat_type) = match read_c2s(&mut stream, state.rate_limit.max_msg_bytes).await {
         Ok(C2sMsg::Register { device_id, instance_name, transfer_addr, nat_type }) => {
             (device_id, instance_name, transfer_addr, nat_type)
         }
         Ok(other) => {
             warn!("First message is not Register: {:?}", other);
+            decrement_connection_counts(&state, peer_ip).await;
             return;
         }
         Err(e) => {
             debug!("Failed to read first message: {}", e);
+            decrement_connection_counts(&state, peer_ip).await;
             return;
         }
     };
@@ -143,12 +208,14 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
         info!("[{}] pushing {} offline messages", device_id, offline.len());
         if write_s2c(&mut stream, &S2cMsg::OfflineMessages { messages: offline }).await.is_err() {
             warn!("[{}] failed to send offline messages, disconnecting", device_id);
+            decrement_connection_counts(&state, peer_ip).await;
             return;
         }
     }
 
     if write_s2c(&mut stream, &S2cMsg::Registered { friends: online_friends.clone(), observed_addr: observed_ip.clone(), relay_addr: state.relay_addr.clone(), stun_addr: state.stun_addr.clone(), iroh_relay_url: state.iroh_relay_url.clone() }).await.is_err() {
         warn!("[{}] failed to send Registered, disconnecting", device_id);
+        decrement_connection_counts(&state, peer_ip).await;
         return;
     }
 
@@ -203,14 +270,28 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
         }
     });
 
+    let mut rate_window_start = Instant::now();
+    let mut rate_msg_count = 0u32;
+
     loop {
-        let msg = match read_c2s_half(&mut read_half).await {
+        let msg = match read_c2s_half(&mut read_half, state.rate_limit.max_msg_bytes).await {
             Ok(m) => m,
             Err(e) => {
                 debug!("[{}] read error: {}", device_id, e);
                 break;
             }
         };
+
+        let now = Instant::now();
+        if now.duration_since(rate_window_start).as_secs() >= 1 {
+            rate_window_start = now;
+            rate_msg_count = 0;
+        }
+        rate_msg_count += 1;
+        if rate_msg_count > state.rate_limit.rate_limit_msgs_per_sec {
+            warn!("[{}] rate limit exceeded ({} msg/s), disconnecting", device_id, rate_msg_count);
+            break;
+        }
 
         match msg {
             C2sMsg::Register { .. } => {
@@ -407,6 +488,8 @@ pub async fn handle_connection(state: Arc<ServerState>, mut stream: TcpStream) {
 
     write_task.abort();
 
+    decrement_connection_counts(&state, peer_ip).await;
+
     {
         let mut online_map = state.online.write().await;
         online_map.remove(&device_id);
@@ -476,10 +559,13 @@ fn notify_friends_online(
     }
 }
 
-async fn read_c2s_half(stream: &mut tokio::net::tcp::OwnedReadHalf) -> anyhow::Result<C2sMsg> {
+async fn read_c2s_half(stream: &mut tokio::net::tcp::OwnedReadHalf, max_bytes: usize) -> anyhow::Result<C2sMsg> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > max_bytes {
+        return Err(anyhow::anyhow!("message too large: {} bytes (limit {})", len, max_bytes));
+    }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     let msg = serde_json::from_slice(&buf)?;

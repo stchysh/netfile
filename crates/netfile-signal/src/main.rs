@@ -28,6 +28,18 @@ struct Args {
     stun_enabled: bool,
     #[arg(long)]
     iroh_relay_url: Option<String>,
+    /// 全局最大并发连接数
+    #[arg(long, default_value_t = 500)]
+    max_connections: usize,
+    /// 单 IP 最大并发连接数
+    #[arg(long, default_value_t = 5)]
+    max_connections_per_ip: usize,
+    /// 单连接每秒最大消息数
+    #[arg(long, default_value_t = 20)]
+    rate_limit_msgs_per_sec: u32,
+    /// 单条消息最大字节数
+    #[arg(long, default_value_t = 65536)]
+    max_msg_bytes: usize,
 }
 
 #[tokio::main]
@@ -81,7 +93,12 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let state = server::ServerState::new_full(relay_addr, stun_addr, args.iroh_relay_url);
+    let state = server::ServerState::new_full(relay_addr, stun_addr, args.iroh_relay_url, server::RateLimitConfig {
+        max_connections: args.max_connections,
+        max_connections_per_ip: args.max_connections_per_ip,
+        rate_limit_msgs_per_sec: args.rate_limit_msgs_per_sec,
+        max_msg_bytes: args.max_msg_bytes,
+    });
 
     {
         let state = state.clone();

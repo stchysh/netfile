@@ -527,8 +527,9 @@ function Settings({ onClose }: Props) {
         <div className="settings-section">
           <h3>诊断</h3>
           <div className="form-group">
+            <label>日志导出</label>
             <button
-              className="export-diag-button"
+              className="browse-button"
               onClick={async () => {
                 try {
                   const path = await invoke<string>('export_diagnostics')

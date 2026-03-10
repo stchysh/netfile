@@ -99,6 +99,14 @@ depth: maximum
 - README 只记录项目当前状态，不记录历史变更过程
 - 更新后将 `README.md` 一并加入 commit
 
+**GitHub Release 发布规范（强制）**：
+- 每次发布 GitHub Release 必须同时包含以下两个文件：
+  1. **GUI 安装包**：`NetFile_x.x.x_x64-setup.exe`（Tauri 构建产物，位于 `target/release/bundle/nsis/`）
+  2. **信令服务器**：`netfile-signal.exe`（位于 `target/release/`）
+- 构建顺序：`pnpm build`（前端）→ `cargo build --release --package netfile-signal`（信令服务器）→ `cargo tauri build`（GUI 安装包）
+- 发布前必须 `cargo clean` 避免使用旧缓存产物
+- 使用 `gh release create <tag> <gui_installer>#<重命名.exe> <signal.exe>#netfile-signal.exe --title ... --notes ...`
+
 **自动提交规则（强制）**：
 - 每次完成用户需求后，必须自动创建 git commit
 - commit 前先执行 `git status` 和 `git diff` 查看变更

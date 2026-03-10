@@ -7,6 +7,11 @@
     "devUrl": "http://localhost:5173",
     "frontendDist": "ui/dist"
   },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": []
+  },
   "app": {
     "windows": [
       {
@@ -16,25 +21,6 @@
         "resizable": true,
         "dragDropEnabled": true
       }
-    ],
-    "security": {
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["**"]
-      },
-      "capabilities": [
-        {
-          "identifier": "main-capability",
-          "windows": ["main"],
-          "permissions": [
-            "core:default",
-            "dialog:allow-open",
-            "dialog:allow-save",
-            "dialog:allow-message",
-            "shell:allow-open"
-          ]
-        }
-      ]
-    }
+    ]
   }
 }

@@ -521,26 +521,22 @@ function Settings({ onClose }: Props) {
                 <span>启用 TLS 加密</span>
               </label>
             </div>
-          </div>
-        </div>
-
-        <div className="settings-section">
-          <h3>诊断</h3>
-          <div className="form-group">
-            <label>日志导出</label>
-            <button
-              className="browse-button"
-              onClick={async () => {
-                try {
-                  const path = await invoke<string>('export_diagnostics')
-                  alert(`诊断日志已导出: ${path}`)
-                } catch (e) {
-                  alert(`导出失败: ${e}`)
-                }
-              }}
-            >
-              导出诊断日志
-            </button>
+            <div className="form-group">
+              <label>诊断日志</label>
+              <button
+                className="browse-button"
+                onClick={async () => {
+                  try {
+                    const path = await invoke<string>('export_diagnostics')
+                    alert(`诊断日志已导出: ${path}`)
+                  } catch (e) {
+                    alert(`导出失败: ${e}`)
+                  }
+                }}
+              >
+                导出诊断日志
+              </button>
+            </div>
           </div>
         </div>
 

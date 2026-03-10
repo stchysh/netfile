@@ -106,6 +106,7 @@ depth: maximum
 - 构建顺序：`pnpm build`（前端）→ `cargo build --release --package netfile-signal`（信令服务器）→ `cargo tauri build`（GUI 安装包）
 - 发布前必须 `cargo clean` 避免使用旧缓存产物
 - 使用 `gh release create <tag> <gui_installer>#<重命名.exe> <signal.exe>#netfile-signal.exe --title ... --notes ...`
+- **触发时机**：仅在用户明确要求发布时执行，不自动触发
 
 **自动提交规则（强制）**：
 - 每次完成用户需求后，必须自动创建 git commit

@@ -138,7 +138,19 @@ async fn send_file(
             if let Some(device_id) = peer_device_id.as_deref() {
                 let sc_guard = signal_client.read().await;
                 if let Some(sc) = sc_guard.as_ref() {
-                    if let Some(iroh_addr_json) = sc.get_peer_iroh_addr(device_id).await {
+                    let iroh_addr_json = {
+                        let mut found = sc.get_peer_iroh_addr(device_id).await;
+                        if found.is_none() {
+                            tracing::info!("iroh_addr not yet available for peer_device_id={}, waiting up to 8s", device_id);
+                            for _ in 0..8 {
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                found = sc.get_peer_iroh_addr(device_id).await;
+                                if found.is_some() { break; }
+                            }
+                        }
+                        found
+                    };
+                    if let Some(iroh_addr_json) = iroh_addr_json {
                         tracing::info!("trying iroh transfer for peer_device_id={}", device_id);
                         direct_ok = try_iroh_transfer(&service, &path, &iroh_addr_json, compression, &path_for_log).await;
                     } else {
@@ -839,8 +851,11 @@ fn spawn_iroh_addr_watcher(sc: Arc<SignalClient>, iroh_manager: Arc<IrohManager>
             last_addr_json = addr_json;
         }
 
+        let start = std::time::Instant::now();
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let elapsed = start.elapsed().as_secs();
+            let interval = if elapsed < 120 { 5 } else { 30 };
+            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
             let addr = iroh_manager.endpoint_addr();
             if let Ok(addr_json) = serde_json::to_string(&addr) {
                 if addr_json != last_addr_json {

@@ -1417,10 +1417,24 @@ impl TransferService {
         }
         self.iroh_conn_cache.write().await.remove(&id);
 
-        info!("Establishing new iroh connection to {:?}", id);
-        let conn = self.iroh_manager.connect(endpoint_addr).await?;
-        self.iroh_conn_cache.write().await.insert(id, conn.clone());
-        Ok(conn)
+        let mut last_err = anyhow::anyhow!("no attempts");
+        for attempt in 0u32..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(200 * (1 << (attempt - 1)))).await;
+            }
+            info!("Establishing new iroh connection to {:?} (attempt {})", id, attempt + 1);
+            match self.iroh_manager.connect(endpoint_addr.clone()).await {
+                Ok(conn) => {
+                    self.iroh_conn_cache.write().await.insert(id, conn.clone());
+                    return Ok(conn);
+                }
+                Err(e) => {
+                    warn!("iroh connection attempt {} failed: {}", attempt + 1, e);
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
     }
 
     /// Returns (effective_limit_bytes_per_sec, speed_limit_source).

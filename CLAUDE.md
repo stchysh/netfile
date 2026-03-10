@@ -94,6 +94,11 @@ depth: maximum
 
 ## 7 代码提交
 
+**提交前更新 README（强制）**：
+- 每次 git commit 之前，必须先更新 `README.md`，将本次变更涉及的功能、架构、命令等同步到文档中
+- README 只记录项目当前状态，不记录历史变更过程
+- 更新后将 `README.md` 一并加入 commit
+
 **自动提交规则（强制）**：
 - 每次完成用户需求后，必须自动创建 git commit
 - commit 前先执行 `git status` 和 `git diff` 查看变更

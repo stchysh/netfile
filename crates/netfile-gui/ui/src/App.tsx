@@ -70,7 +70,10 @@ function App() {
         const tag: string = data?.tag_name ?? ''
         const remote = tag.replace(/^v/, '')
         if (remote && remote !== APP_VERSION) {
-          setNewVersion(remote)
+          const skipped = localStorage.getItem('netfile-skipped-version')
+          if (skipped !== remote) {
+            setNewVersion(remote)
+          }
         }
       })
       .catch(() => {})
@@ -140,9 +143,42 @@ function App() {
   return (
     <div className="app">
       {newVersion && (
-        <div className="version-banner">
-          新版本 v{newVersion} 可用，<a href="https://github.com/stchysh/netfile/releases/latest" target="_blank" rel="noreferrer">前往下载</a>
-          <button className="version-banner-close" onClick={() => setNewVersion(null)}>x</button>
+        <div className="modal-overlay" onClick={() => setNewVersion(null)}>
+          <div className="modal-content update-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>发现新版本</h2>
+            </div>
+            <div className="modal-body">
+              <p>当前版本 v{APP_VERSION}，新版本 v{newVersion} 已发布。</p>
+              <p>是否前往下载更新？</p>
+            </div>
+            <div className="modal-footer update-modal-footer">
+              <button
+                className="cancel-button"
+                onClick={() => setNewVersion(null)}
+              >
+                取消
+              </button>
+              <button
+                className="skip-version-button"
+                onClick={() => {
+                  localStorage.setItem('netfile-skipped-version', newVersion)
+                  setNewVersion(null)
+                }}
+              >
+                跳过此版本
+              </button>
+              <button
+                className="save-button"
+                onClick={() => {
+                  window.open('https://github.com/stchysh/netfile/releases/latest', '_blank')
+                  setNewVersion(null)
+                }}
+              >
+                前往更新
+              </button>
+            </div>
+          </div>
         </div>
       )}
       <header className="app-header">

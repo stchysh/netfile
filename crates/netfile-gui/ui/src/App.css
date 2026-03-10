@@ -120,31 +120,29 @@
   color: inherit;
 }
 
-.version-banner {
-  background-color: #e8f4fd;
-  border-bottom: 1px solid #bee3f8;
-  color: #2b6cb0;
-  padding: 0.4rem 1.5rem;
-  font-size: 0.875rem;
+.update-modal {
+  max-width: 420px;
+  width: 100%;
+}
+
+.update-modal-footer {
   display: flex;
-  align-items: center;
   gap: 0.5rem;
+  justify-content: flex-end;
 }
 
-.version-banner a {
-  color: #2b6cb0;
-  font-weight: 600;
-}
-
-.version-banner-close {
-  background: none;
-  border: none;
+.skip-version-button {
+  padding: 0.625rem 1.25rem;
+  background-color: #f0f0f0;
+  color: #555;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 0.9375rem;
   cursor: pointer;
-  color: #2b6cb0;
-  font-size: 1rem;
-  padding: 0;
-  margin-left: auto;
-  line-height: 1;
+}
+
+.skip-version-button:hover {
+  background-color: #e0e0e0;
 }
 
 .toast-container {
